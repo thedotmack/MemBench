@@ -78,6 +78,13 @@ export interface ForkContext {
   injectionBlock: string;
   item: CorpusItem;
   variant: Variant;
+  /**
+   * The claude-mem project the fork's memory is filed under (the item's
+   * provenance.json project_slug) — what /api/context/inject was targeted
+   * at, recorded here so Phase 6 can write the run manifest without
+   * re-reading provenance.
+   */
+  projectSlug: string;
 }
 
 /**
