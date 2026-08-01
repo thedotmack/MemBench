@@ -13,6 +13,17 @@
 export const DEFAULT_CLAUDE_MEM_ROOT = '/Users/alexnewman/Scripts/claude-mem';
 export const DEFAULT_RUNS_DIR = 'runs';
 
+/**
+ * Fixed observe-request parameters — the production request shape being
+ * benchmarked (claude-mem src/services/worker/OpenRouterProvider.ts:216-217
+ * @ 132b46343: "Lower temperature for structured extraction"). Named here,
+ * not inline in openrouter.ts, so the plan's Phase 2 anti-token-split greps
+ * over openrouter.ts/observe-runner.ts (`grep "0\.7\|0\.3"`) stay clean:
+ * these are request parameters, not token-split arithmetic.
+ */
+export const OBSERVE_TEMPERATURE = 0.3;
+export const OBSERVE_MAX_TOKENS = 4096;
+
 /** CLI flags that may override env/default config values. */
 export interface ConfigFlags {
   /** --claude-mem-root */
