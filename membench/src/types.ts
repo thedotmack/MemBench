@@ -16,6 +16,17 @@ export type ExecutorName = 'claude-cli' | 'openrouter-agent';
 export type Variant = `model:${string}` | 'none' | 'oracle' | 'shuffled';
 
 /**
+ * check.sh exit contract (tri-state) — every corpus item's check.sh follows
+ * it, and Phase 6 scoring must interpret it exactly:
+ *   - CHECK_EXIT_PASS (0): mechanical success — the task outcome is verified.
+ *   - CHECK_EXIT_JUDGE (3): mechanical checking is impossible for this item —
+ *     defer to the judge model with the success.md rubric.
+ *   - any other exit code: fail.
+ */
+export const CHECK_EXIT_PASS = 0;
+export const CHECK_EXIT_JUDGE = 3;
+
+/**
  * One frozen corpus item (corpus/<item-id>/ — the directory format is
  * defined in plan Phase 3; Phase 1 only needs the handle).
  */

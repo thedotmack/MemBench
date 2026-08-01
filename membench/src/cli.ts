@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 /**
- * membench CLI entry point. Phase 1 scaffold: subcommand dispatch + help.
- * Subcommand implementations arrive in later phases (observe: Phase 2/6,
- * corpus: Phase 3, run: Phase 6, score/cost: Phase 7).
+ * membench CLI entry point. Subcommand dispatch + help.
+ * Implemented: corpus (Phase 3). Pending: observe (Phase 2/6 wiring),
+ * run (Phase 6), score/cost (Phase 7).
  */
+
+import { corpusMain } from './corpus.js';
 
 const SUBCOMMANDS = ['run', 'observe', 'corpus', 'score', 'cost'] as const;
 
@@ -22,7 +24,7 @@ Options:
   -h, --help   Show this help
 `;
 
-export function main(argv: string[]): number {
+export async function main(argv: string[]): Promise<number> {
   const args = argv.slice(2);
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
@@ -37,10 +39,14 @@ export function main(argv: string[]): number {
     return 1;
   }
 
-  console.error(`membench ${subcommand}: not implemented yet (Phase 1 scaffold)`);
+  if (subcommand === 'corpus') {
+    return corpusMain(args.slice(1));
+  }
+
+  console.error(`membench ${subcommand}: not implemented yet`);
   return 1;
 }
 
 if (import.meta.main) {
-  process.exit(main(process.argv));
+  process.exit(await main(process.argv));
 }

@@ -1,0 +1,12 @@
+{
+  "content_session_id": "dac6a5b7-ad1c-41b3-bea4-9e66467cac84",
+  "project_slug": "claude-mem-pro",
+  "session_n_plus_1_id": "8337c688-4440-4e94-9178-aacb757a2f9c",
+  "dates": {
+    "session_n_started": "2026-07-15T01:43:46.761Z",
+    "session_n_ended": "2026-07-15T04:44:10.498Z",
+    "session_n_plus_1_started": "2026-07-15T04:45:44.134Z"
+  },
+  "sanitizer_version": 3,
+  "content_hash": "768f08e3f159dd8d375c1ce5553702709cb1d07ded4756aae5b53aedafe73abd"
+}

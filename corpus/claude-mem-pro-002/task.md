@@ -1,0 +1,1 @@
+use sequential thinking and look for gaps in implementation, it's still not showing live updates the same way the viewer does, it needs to have the same SSE and instant connections as the live viewer, it shouldn't be loading from DB after update, it should use the same local pipeline.
