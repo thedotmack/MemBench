@@ -1,0 +1,11 @@
+# Valid MemBench run-spec fixture (Phase 1 tests).
+corpus_items = ["claude-mem-pro-001", "freckle-nail-001"]
+observer_models = ["google/gemini-2.5-flash", "openai/gpt-5-mini"]
+executors = ["claude-cli", "openrouter-agent"]
+k = 3
+observe_timeout_s = 300
+execute_timeout_s = 1800
+judge_model = "anthropic/claude-sonnet-4.5"
+max_cost_usd = 25.0
+max_steps = 50
+max_cost_per_run_usd = 2.5
