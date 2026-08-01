@@ -79,6 +79,12 @@ export interface PortPool {
   /** Synchronous — two concurrent prepareForks can never receive the same port. */
   acquire(): number;
   release(port: number): void;
+  /**
+   * Total ports the pool was built with, when known. Callers bound their fork
+   * concurrency by it — more concurrent forks than ports is a guaranteed
+   * "port pool exhausted" mid-run.
+   */
+  readonly size?: number;
 }
 
 /**
@@ -106,6 +112,7 @@ export function createPortPool(start = 38700, count = 200, probe = true): PortPo
   }
 
   return {
+    size: count,
     acquire(): number {
       while (free.length > 0) {
         const port = free.shift()!;
@@ -427,6 +434,22 @@ export function variantSlug(variant: Variant): string {
   return `${cleaned}-${hash}`;
 }
 
+/**
+ * The on-disk location of one fork. Exported so the orchestrator can inspect
+ * (or quarantine) a fork dir left behind by a crashed attempt WITHOUT
+ * duplicating the layout rule.
+ */
+export function forkDirPath(
+  runsDir: string,
+  runId: string,
+  itemId: string,
+  variant: Variant,
+  cellLabel?: string,
+): string {
+  const dirName = cellLabel ? `${variantSlug(variant)}-${cellLabel}` : variantSlug(variant);
+  return resolve(runsDir, runId, 'forks', itemId, dirName);
+}
+
 interface ItemProvenance {
   project_slug?: string;
   dates?: { session_n_ended?: string | null };
@@ -458,6 +481,16 @@ export interface PrepareForkOptions {
    */
   observations?: ParsedObservation[];
   claudeMemRoot?: string;
+  /**
+   * Disambiguates fork dirs when the SAME (item, variant) is forked more than
+   * once in a run — which it always is: k repetitions × N executor lanes all
+   * share (item, variant). Without it those fork-runs would collide on
+   * <runs>/<run_id>/forks/<item>/<variant>/ (shared repo checkout, overwritten
+   * transcripts/diffs, and a data-dir race when they run concurrently), so
+   * Phase 6 passes `<executor>-<run_index>`. Appended to the variant dir name;
+   * omitted = the bare Phase 4 layout.
+   */
+  cellLabel?: string;
   /** Seams for offline tests (default: real spawn / real git / real tree kill). */
   spawnWorker?: SpawnWorkerFn;
   cloneRepo?: CloneRepoFn;
@@ -481,6 +514,7 @@ export async function prepareFork(
     runId,
     portPool,
     observations,
+    cellLabel,
     // Same resolution as everything else: flag ?? CLAUDE_MEM_ROOT env ??
     // default (config.ts) — no second copy of the path.
     claudeMemRoot = loadConfig().claudeMemRoot,
@@ -497,7 +531,7 @@ export async function prepareFork(
     throw new ForkError(`variant ${variant} requires an observation set (pass [] for an empty observer outcome)`);
   }
 
-  const forkDir = resolve(runsDir, runId, 'forks', item.id, variantSlug(variant));
+  const forkDir = forkDirPath(runsDir, runId, item.id, variant, cellLabel);
   const dataDir = join(forkDir, 'mem');
   const homeDir = join(forkDir, 'home');
   const repoDir = join(forkDir, 'repo');

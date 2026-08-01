@@ -120,3 +120,39 @@ describe('validateRunSpec value validation', () => {
     expect(() => validateRunSpec(['not', 'a', 'table'], 'spec')).toThrow(SpecError);
   });
 });
+
+describe('optional Phase 6 keys', () => {
+  test('accepts them when present and omits them when absent', () => {
+    const withOptional = validateRunSpec(
+      { ...baseSpec(), executor_model: 'vendor/model', fork_concurrency: 3, observe_concurrency: 8 },
+      'spec',
+    );
+    expect(withOptional.executor_model).toBe('vendor/model');
+    expect(withOptional.fork_concurrency).toBe(3);
+    expect(withOptional.observe_concurrency).toBe(8);
+
+    const bare = validateRunSpec(baseSpec(), 'spec');
+    expect('executor_model' in bare).toBe(false);
+    expect('fork_concurrency' in bare).toBe(false);
+    expect('observe_concurrency' in bare).toBe(false);
+  });
+
+  test('rejects an empty executor_model', () => {
+    expect(() => validateRunSpec({ ...baseSpec(), executor_model: '' }, 'spec')).toThrow(
+      'executor_model must be a non-empty string when present',
+    );
+    expect(() => validateRunSpec({ ...baseSpec(), executor_model: '  ' }, 'spec')).toThrow(SpecError);
+    expect(() => validateRunSpec({ ...baseSpec(), executor_model: 42 }, 'spec')).toThrow(SpecError);
+  });
+
+  test('rejects zero, negative and non-integer concurrency values', () => {
+    for (const bad of [0, -1, 2.5, '4']) {
+      expect(() => validateRunSpec({ ...baseSpec(), fork_concurrency: bad }, 'spec')).toThrow(
+        'fork_concurrency must be a positive integer when present',
+      );
+      expect(() => validateRunSpec({ ...baseSpec(), observe_concurrency: bad }, 'spec')).toThrow(
+        'observe_concurrency must be a positive integer when present',
+      );
+    }
+  });
+});

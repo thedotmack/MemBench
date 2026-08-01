@@ -60,7 +60,14 @@ export interface ResultRow {
   cost_usd: number | null;
   duration_s: number;
   mem_search_calls: number;
-  drift_flag: boolean;
+  /**
+   * Tri-state (Phase 6): true/false = the judge decided; `null` = drift is
+   * UNKNOWN because the judge was unavailable or its reply was unparseable.
+   * A transport failure must never read as "no drift" — pair it with `judged`.
+   */
+  drift_flag: boolean | null;
+  /** Whether a judge model call actually completed for this run. */
+  judged: boolean;
   drift_note?: string;
   /** e.g. "json" when the JSON-mode accommodation was applied (plan Phase 2). */
   accommodation?: string;

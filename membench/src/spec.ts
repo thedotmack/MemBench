@@ -36,6 +36,23 @@ export interface RunSpec {
   max_steps: number;
   /** Executor stop condition: max spend per fork-run, USD. */
   max_cost_per_run_usd: number;
+
+  // --- Optional keys (Phase 6 orchestration) -------------------------------
+  // Optional so every spec written against the Phase 1 schema still loads.
+  /**
+   * Model the `openrouter-agent` executor lane runs (plan Phase 5.2: "model
+   * from the run spec"). Required — and checked by the Phase 6 runner — only
+   * when that lane is selected for a live run.
+   */
+  executor_model?: string;
+  /**
+   * How many forks may be live at once. Each fork spawns its own claude-mem
+   * worker, so this is a machine-load knob; it lives in the spec because it
+   * is part of what a published run declares. Default 2 (Phase 6).
+   */
+  fork_concurrency?: number;
+  /** How many (item, observer model) observe replays run at once. Default 4. */
+  observe_concurrency?: number;
 }
 
 const EXECUTOR_NAMES: readonly string[] = ['claude-cli', 'openrouter-agent'];
@@ -51,6 +68,13 @@ const KNOWN_KEYS: readonly (keyof RunSpec)[] = [
   'max_cost_usd',
   'max_steps',
   'max_cost_per_run_usd',
+];
+
+/** Keys a spec MAY declare (absent = the Phase 6 default documented above). */
+const OPTIONAL_KEYS: readonly (keyof RunSpec)[] = [
+  'executor_model',
+  'fork_concurrency',
+  'observe_concurrency',
 ];
 
 function isStringArray(value: unknown): value is string[] {
@@ -75,7 +99,7 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
   }
   const table = raw as Record<string, unknown>;
 
-  const known = new Set<string>(KNOWN_KEYS);
+  const known = new Set<string>([...KNOWN_KEYS, ...OPTIONAL_KEYS]);
   const unknownKeys = Object.keys(table).filter((key) => !known.has(key));
   if (unknownKeys.length > 0) {
     throw new SpecError(`${source}: unknown key(s): ${unknownKeys.join(', ')}`);
@@ -97,6 +121,9 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
     max_cost_usd,
     max_steps,
     max_cost_per_run_usd,
+    executor_model,
+    fork_concurrency,
+    observe_concurrency,
   } = table;
 
   if (!isStringArray(corpus_items) || corpus_items.length === 0) {
@@ -141,6 +168,15 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
   if (!isPositiveNumber(max_cost_per_run_usd)) {
     throw new SpecError(`${source}: max_cost_per_run_usd must be a positive number`);
   }
+  if (executor_model !== undefined && (typeof executor_model !== 'string' || executor_model.trim() === '')) {
+    throw new SpecError(`${source}: executor_model must be a non-empty string when present`);
+  }
+  if (fork_concurrency !== undefined && !isPositiveInteger(fork_concurrency)) {
+    throw new SpecError(`${source}: fork_concurrency must be a positive integer when present`);
+  }
+  if (observe_concurrency !== undefined && !isPositiveInteger(observe_concurrency)) {
+    throw new SpecError(`${source}: observe_concurrency must be a positive integer when present`);
+  }
 
   return {
     corpus_items,
@@ -153,6 +189,10 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
     max_cost_usd,
     max_steps,
     max_cost_per_run_usd,
+    // Spread-when-present: an absent optional key stays absent on the object.
+    ...(executor_model !== undefined ? { executor_model } : {}),
+    ...(fork_concurrency !== undefined ? { fork_concurrency } : {}),
+    ...(observe_concurrency !== undefined ? { observe_concurrency } : {}),
   };
 }
 

@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 /**
  * membench CLI entry point. Subcommand dispatch + help.
- * Implemented: corpus (Phase 3). Pending: observe (Phase 2/6 wiring),
- * run (Phase 6), score/cost (Phase 7).
+ * Implemented: corpus (Phase 3), run + observe (Phase 6).
+ * Pending: score/cost (Phase 7).
  */
 
 import { corpusMain } from './corpus.js';
+import { observeMain, runMain } from './run-command.js';
 
 const SUBCOMMANDS = ['run', 'observe', 'corpus', 'score', 'cost'] as const;
 
@@ -41,6 +42,12 @@ export async function main(argv: string[]): Promise<number> {
 
   if (subcommand === 'corpus') {
     return corpusMain(args.slice(1));
+  }
+  if (subcommand === 'run') {
+    return runMain(args.slice(1));
+  }
+  if (subcommand === 'observe') {
+    return observeMain(args.slice(1));
   }
 
   console.error(`membench ${subcommand}: not implemented yet`);
