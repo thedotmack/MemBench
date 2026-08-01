@@ -37,6 +37,7 @@ import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { loadConfig } from './config.js';
 import { firstHumanPrompt, type TranscriptRow } from './corpus.js';
+import { allowlistedParentEnv } from './executors/shared.js';
 import { readJsonl } from './jsonl.js';
 import type { CorpusItem, ForkContext, Variant } from './types.js';
 import type { ParsedObservation } from './vendor/parser.js';
@@ -141,42 +142,20 @@ export interface SpawnWorkerOptions {
 export type SpawnWorkerFn = (opts: SpawnWorkerOptions) => WorkerHandle;
 
 /**
- * The ONLY parent-env keys a spawned worker inherits. An ALLOWLIST, not a
- * strip-list: a strip-list leaks every secret it didn't anticipate
- * (OPENROUTER_API_KEY, OPENAI_API_KEY, GITHUB_TOKEN, …) into every worker.
- * This is stricter than CM's own sanitizeEnv (worker-service.ts:931-939
- * @ 132b46343, which only strips CLAUDE_CODE_* and Anthropic keys) — a
- * benchmark worker needs nothing but a shell-ish baseline. LC_* passes as a
- * prefix (locale vars).
- */
-const WORKER_ENV_ALLOWLIST = new Set([
-  'PATH',
-  'TMPDIR',
-  'TEMP',
-  'TMP',
-  'LANG',
-  'SHELL',
-  'USER',
-  'LOGNAME',
-  'TZ',
-  'TERM',
-]);
-
-/**
- * Build the spawned worker's env: an allowlisted baseline from the parent
- * environment plus the fork's isolation vars — no other parent key (and so
- * no secret, and no user CLAUDE_MEM_* / CLAUDE_CODE_* / ANTHROPIC_* value
- * that could repoint the fork at real data) survives. HOME and CLAUDE_CONFIG_DIR
- * are pointed inside the fork's home so the worker's homedir fallbacks
- * (paths.ts:38-67), plugin-disabled gate (plugin-state.ts:10-22) and
- * marketplace paths never read the user's real ~/.claude or ~/.claude-mem.
+ * Build the spawned worker's env: the allowlisted baseline from the parent
+ * environment (shared.ts allowlistedParentEnv — an ALLOWLIST, not a
+ * strip-list: a strip-list leaks every secret it didn't anticipate; stricter
+ * than CM's own sanitizeEnv, worker-service.ts:931-939 @ 132b46343, which
+ * only strips CLAUDE_CODE_* and Anthropic keys) plus the fork's isolation
+ * vars — no other parent key (and so no secret, and no user CLAUDE_MEM_* /
+ * CLAUDE_CODE_* / ANTHROPIC_* value that could repoint the fork at real
+ * data) survives. HOME and CLAUDE_CONFIG_DIR are pointed inside the fork's
+ * home so the worker's homedir fallbacks (paths.ts:38-67), plugin-disabled
+ * gate (plugin-state.ts:10-22) and marketplace paths never read the user's
+ * real ~/.claude or ~/.claude-mem.
  */
 export function buildWorkerEnv(dataDir: string, port: number, homeDir: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (WORKER_ENV_ALLOWLIST.has(key) || key.startsWith('LC_')) env[key] = value;
-  }
+  const env = allowlistedParentEnv();
   env.HOME = homeDir;
   env.CLAUDE_MEM_DATA_DIR = dataDir;
   env.CLAUDE_MEM_WORKER_PORT = String(port);
