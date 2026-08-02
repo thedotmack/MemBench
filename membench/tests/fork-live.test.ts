@@ -18,7 +18,7 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseOracleObservations } from '../src/controls.ts';
-import { createPortPool, prepareFork, teardownFork, type PreparedFork } from '../src/fork.ts';
+import { prepareFork, teardownFork, type PreparedFork } from '../src/fork.ts';
 import type { CorpusItem } from '../src/types.ts';
 import type { ParsedObservation } from '../src/vendor/parser.ts';
 
@@ -125,21 +125,18 @@ describeLive('live worker isolation (MEMBENCH_LIVE_WORKER=1)', () => {
       const itemA = makeItemDir('live-a', 'membench-live-a', repoPath, commit);
       const itemB = makeItemDir('live-b', 'membench-live-b', repoPath, commit);
       const runsDir = tempDir('runs');
-      const pool = createPortPool();
 
       // Spawn + seed BOTH real workers concurrently (guard 4: distinct
       // ports, distinct data dirs, one worker per variant).
       const [forkA, forkB] = await Promise.all([
         prepareFork(itemA, 'model:live/alpha', runsDir, {
           runId: 'live-run',
-          portPool: pool,
           observations: WORKER_A_OBSERVATIONS,
           claudeMemRoot: CLAUDE_MEM_ROOT,
           readinessTimeoutMs: 120_000,
         }),
         prepareFork(itemB, 'oracle', runsDir, {
           runId: 'live-run',
-          portPool: pool,
           observations: oracleRows,
           claudeMemRoot: CLAUDE_MEM_ROOT,
           readinessTimeoutMs: 120_000,

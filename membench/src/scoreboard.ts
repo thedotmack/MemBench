@@ -15,9 +15,9 @@
  *   `claude-cli` and `openrouter-agent` rows. Cross-executor deltas exist only
  *   under Diagnostics (and in the cost table, `cost-table.ts`).
  *
- *   Headline discipline — observation counts, observe tokens, parse notes and
- *   accommodations are DIAGNOSTICS. They appear under `## Diagnostics` and
- *   nowhere above it (plan Phase 7 verification, line 328).
+ *   Headline discipline — observation counts, observe tokens and parse notes
+ *   are DIAGNOSTICS. They appear under `## Diagnostics` and nowhere above it
+ *   (plan Phase 7 verification, line 328).
  *
  * Guard 1 (never estimate cost): every cost here is a sum of REPORTED
  * `usage.cost` values. Rows whose provider reported no cost are counted and
@@ -208,7 +208,6 @@ export interface NormalizedRow {
   mem_search_calls: number | null;
   drift_flag: boolean | null;
   judged: boolean;
-  accommodation: string | null;
   error: string | null;
 }
 
@@ -260,7 +259,6 @@ export function normalizeRow(value: unknown): NormalizedRow | string {
     mem_search_calls: normalizeNumber(row.mem_search_calls),
     drift_flag: typeof row.drift_flag === 'boolean' ? row.drift_flag : null,
     judged: row.judged === true,
-    accommodation: typeof row.accommodation === 'string' && row.accommodation !== '' ? row.accommodation : null,
     error: typeof row.error === 'string' && row.error !== '' ? row.error : null,
   };
 }
@@ -462,9 +460,6 @@ export interface VariantStats {
   drift_flagged: number;
   drift_rate: number | null;
   drift_unjudged: number;
-  /** Rows carrying an accommodation (surfaced, never silently averaged in). */
-  accommodation_rows: number;
-  accommodations: string[];
 }
 
 export interface ExecutorSection {
@@ -508,11 +503,9 @@ export interface Diagnostics {
     obs_tokens_in: number | null;
     obs_tokens_out: number | null;
     obs_cost_usd: number | null;
-    accommodation: string | null;
     error: string | null;
   }[];
   parse_note_samples: string[];
-  accommodations: { model: string; accommodation: string; items: string[] }[];
   per_item: PerItemStat[];
   cross_executor: CrossExecutorDelta[];
   skipped_result_rows: SkippedRow[];
@@ -566,20 +559,16 @@ function sortVariants(variants: string[]): string[] {
 interface ObsAggregate {
   usd: number | null;
   unreported: number;
-  accommodations: Set<string>;
 }
 
 function aggregateObsByModel(records: ObserveRecord[]): Map<string, ObsAggregate> {
   const byModel = new Map<string, ObsAggregate>();
   for (const record of records) {
     const model = record.model;
-    const entry = byModel.get(model) ?? { usd: null, unreported: 0, accommodations: new Set<string>() };
+    const entry = byModel.get(model) ?? { usd: null, unreported: 0 };
     const cost = normalizeNumber(record.obs_cost_usd);
     if (cost !== null) entry.usd = (entry.usd ?? 0) + cost;
     else entry.unreported += 1;
-    if (typeof record.accommodation === 'string' && record.accommodation !== '') {
-      entry.accommodations.add(record.accommodation);
-    }
     byModel.set(model, entry);
   }
   return byModel;
@@ -601,11 +590,6 @@ function statsForCell(
     .filter((value): value is number => value !== null);
   const judgedRows = rows.filter((row) => row.judged);
   const drifted = judgedRows.filter((row) => row.drift_flag === true).length;
-  const accommodationRows = rows.filter((row) => row.accommodation !== null);
-  const accommodations = new Set<string>(
-    accommodationRows.map((row) => row.accommodation).filter((value): value is string => value !== null),
-  );
-  for (const value of obs?.accommodations ?? []) accommodations.add(value);
 
   return {
     variant,
@@ -636,8 +620,6 @@ function statsForCell(
     drift_flagged: drifted,
     drift_rate: driftRate(drifted, judgedRows.length),
     drift_unjudged: rows.length - judgedRows.length,
-    accommodation_rows: accommodationRows.length,
-    accommodations: [...accommodations].sort(),
   };
 }
 
@@ -755,19 +737,6 @@ export function buildSummary(input: BuildSummaryInput): RunSummary {
     }
   }
 
-  const accommodationIndex = new Map<string, { model: string; accommodation: string; items: Set<string> }>();
-  for (const record of observeRecords) {
-    if (typeof record.accommodation !== 'string' || record.accommodation === '') continue;
-    const key = `${record.model} ${record.accommodation}`;
-    const entry = accommodationIndex.get(key) ?? {
-      model: record.model,
-      accommodation: record.accommodation,
-      items: new Set<string>(),
-    };
-    entry.items.add(record.item_id);
-    accommodationIndex.set(key, entry);
-  }
-
   const parseNoteSamples: string[] = [];
   for (const record of observeRecords) {
     for (const note of Array.isArray(record.parse_notes) ? record.parse_notes : []) {
@@ -809,15 +778,9 @@ export function buildSummary(input: BuildSummaryInput): RunSummary {
         obs_tokens_in: normalizeNumber(record.obs_tokens_in),
         obs_tokens_out: normalizeNumber(record.obs_tokens_out),
         obs_cost_usd: normalizeNumber(record.obs_cost_usd),
-        accommodation: typeof record.accommodation === 'string' ? record.accommodation : null,
         error: typeof record.error === 'string' ? record.error : null,
       })),
       parse_note_samples: parseNoteSamples,
-      accommodations: [...accommodationIndex.values()].map((entry) => ({
-        model: entry.model,
-        accommodation: entry.accommodation,
-        items: [...entry.items].sort(),
-      })),
       per_item: perItem,
       cross_executor: crossExecutor,
       skipped_result_rows: skippedRows,
@@ -942,12 +905,6 @@ function laneFootnotes(section: ExecutorSection): string[] {
     }
   }
   for (const stats of all) {
-    if (stats.accommodation_rows > 0 || stats.accommodations.length > 0) {
-      notes.push(
-        `**accommodation** — ${cell(variantLabel(stats))}: ${stats.accommodation_rows} row(s) ran with ` +
-          `\`${cell(stats.accommodations.join(', ') || 'unknown')}\`. Its content competes, but its tag discipline failed.`,
-      );
-    }
     if (stats.tokens.missing_usage > 0) {
       notes.push(
         `**missing usage** — ${cell(variantLabel(stats))}: ${stats.tokens.missing_usage} successful run(s) reported ` +
@@ -995,11 +952,8 @@ function renderExecutorSection(section: ExecutorSection): string[] {
     lines.push('| (no observer-model variants in this lane) | | | | | | | | |');
   }
   for (const stats of section.models) {
-    // The accommodation marker rides on the model name: a row that only
-    // competed because its tag discipline was accommodated says so in place.
-    const marker = stats.accommodations.length > 0 ? ` ⚠︎ ${cell(stats.accommodations.join(', '))}` : '';
     lines.push(
-      `| ${cell(variantLabel(stats))}${marker} | ${stats.runs} | ${fmtSuccess(stats)} | ${fmtTokens(stats.tokens)} | ` +
+      `| ${cell(variantLabel(stats))} | ${stats.runs} | ${fmtSuccess(stats)} | ${fmtTokens(stats.tokens)} | ` +
         `${stats.oracle_savings_pct === null ? cell(stats.oracle_savings_note ?? 'n/a') : fmtPctUnits(stats.oracle_savings_pct)} | ` +
         `${fmtExecCost(stats)} | ${fmtObsCost(stats)} | ${fmtBurden(stats)} | ${fmtDrift(stats)} |`,
     );
@@ -1042,30 +996,19 @@ function renderDiagnostics(summary: RunSummary): string[] {
 
   lines.push('### Observation counts and observe-side usage');
   lines.push('');
-  lines.push('| item | observer model | observations | parse notes | obs tokens in | obs tokens out | obs cost | accommodation | error |');
-  lines.push('|---|---|---|---|---|---|---|---|---|');
+  lines.push('| item | observer model | observations | parse notes | obs tokens in | obs tokens out | obs cost | error |');
+  lines.push('|---|---|---|---|---|---|---|---|');
   if (diagnostics.observations.length === 0) {
-    lines.push('| (no observe records) | | | | | | | | |');
+    lines.push('| (no observe records) | | | | | | | |');
   }
   for (const record of diagnostics.observations) {
     lines.push(
       `| ${cell(record.item_id)} | \`${cell(record.model)}\` | ${record.observation_count} | ${record.parse_notes} | ` +
         `${fmtInt(record.obs_tokens_in)} | ${fmtInt(record.obs_tokens_out)} | ${fmtUsd(record.obs_cost_usd, 6)} | ` +
-        `${record.accommodation ? cell(record.accommodation) : '—'} | ${record.error ? cell(record.error) : '—'} |`,
+        `${record.error ? cell(record.error) : '—'} |`,
     );
   }
   lines.push('');
-
-  if (diagnostics.accommodations.length > 0) {
-    lines.push('### Accommodations');
-    lines.push('');
-    for (const entry of diagnostics.accommodations) {
-      lines.push(
-        `- \`${cell(entry.model)}\` → \`${cell(entry.accommodation)}\` on: ${entry.items.map(cell).join(', ')}`,
-      );
-    }
-    lines.push('');
-  }
 
   lines.push('### Parse notes');
   lines.push('');

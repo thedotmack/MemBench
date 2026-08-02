@@ -49,31 +49,9 @@ export const MOCK_OBSERVATION_XML = `<observation>
   </files_modified>
 </observation>`;
 
-/** Canned JSON-mode reply for models driven down the accommodation path. */
-export const MOCK_OBSERVATION_JSON = JSON.stringify({
-  observations: [
-    {
-      type: 'discovery',
-      title: 'Mock observation (json mode)',
-      subtitle: 'canned offline reply',
-      facts: ['The mock provider answered in JSON mode'],
-      narrative: 'Offline mock reply used by --mock runs after the JSON accommodation.',
-      concepts: ['how-it-works'],
-      files_read: ['src/mocks.ts'],
-      files_modified: [],
-    },
-  ],
-});
-
 export interface MockQueryOptions {
   /** Reported cost per call (null → "provider reported no cost"). */
   costUsd?: number | null;
-  /**
-   * Models whose XML replies are unparseable prose, so observe-runner's
-   * >50% parse-fail rule triggers the JSON accommodation; the JSON-mode pass
-   * then returns valid JSON observations.
-   */
-  jsonAccommodationModels?: string[];
   /** When set, every judge call throws with this message (transport failure). */
   judgeFails?: string;
   /** Records every call for assertions. */
@@ -85,9 +63,9 @@ export interface MockQueryOptions {
  * calls with a canned JSON verdict (keyed on measure.ts's prompt marker).
  */
 export function createMockQueryModel(options: MockQueryOptions = {}): QueryModelFn {
-  const { costUsd = 0.0004, jsonAccommodationModels = [], judgeFails, calls } = options;
+  const { costUsd = 0.0004, judgeFails, calls } = options;
 
-  return async (model, messages, opts) => {
+  return async (model, messages) => {
     const last = messages[messages.length - 1];
     const prompt = typeof last?.content === 'string' ? last.content : '';
     calls?.push({ model, prompt });
@@ -110,12 +88,6 @@ export function createMockQueryModel(options: MockQueryOptions = {}): QueryModel
     // production; observation turns return observation XML.
     if (messages.length === 1) {
       return { content: 'Ready to observe this session.', ...usage };
-    }
-    if (jsonAccommodationModels.includes(model)) {
-      // Tag discipline fails in the XML pass; content arrives in JSON mode.
-      return opts?.response_format?.type === 'json_object'
-        ? { content: MOCK_OBSERVATION_JSON, ...usage }
-        : { content: 'I noticed a few things but I will describe them in prose.', ...usage };
     }
     return { content: MOCK_OBSERVATION_XML, ...usage };
   };

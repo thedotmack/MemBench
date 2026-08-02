@@ -1,7 +1,7 @@
 /**
  * Scoreboard tests (plan Phase 7.1 + its verification list):
  *   - every metric renders, sectioned by executor, on a hand-built
- *     results.jsonl covering normal / null-cost / accommodation / null-drift /
+ *     results.jsonl covering normal / null-cost / legacy-field / null-drift /
  *     degenerate / zero-success / malformed rows
  *   - NO NaN or Infinity anywhere in the rendered output or summary.json
  *   - guard 11: no cell mixes claude-cli and openrouter-agent rows
@@ -45,6 +45,7 @@ interface RowInput {
   mem_search_calls?: number;
   drift_flag?: boolean | null;
   judged?: boolean;
+  /** Legacy field from pre-cleanup runs — must be ignored on read, never fatal. */
   accommodation?: string;
   error?: string;
 }
@@ -78,7 +79,7 @@ function row(input: RowInput): Record<string, unknown> {
  *   claude-cli        model:good  — 2 successes with usage + 1 success with NO
  *                                   reported usage (surfaced, not averaged in)
  *                                   and 1 row with NO reported cost
- *                     model:bad   — 0 successes, accommodation="json", drift
+ *                     model:bad   — 0 successes, legacy accommodation field, drift
  *                     none        — floor mean 2100
  *                     oracle      — ceiling mean 1050
  *                     shuffled    — drift_flag null + judged false (unjudged)
@@ -142,6 +143,7 @@ function makeRunDir(options: { manifest?: 'valid' | 'missing' | 'broken' } = {})
       obs_tokens_in: 4000,
       obs_tokens_out: null,
       obs_cost_usd: null,
+      // Legacy field from pre-cleanup observe records: ignored on read.
       accommodation: 'json',
     }),
   );
@@ -354,12 +356,9 @@ describe('summary + scoreboard rendering', () => {
     expect(section).toContain('`shuffled` — relevance control');
   });
 
-  test('accommodation, missing usage, unreported cost and unjudged rows are SURFACED', async () => {
+  test('missing usage, unreported cost and unjudged rows are SURFACED', async () => {
     const { summary, markdown } = await score();
     const cli = summary.executors.find((section) => section.executor === 'claude-cli')!;
-    const bad = cli.models.find((entry) => entry.variant === 'model:bad')!;
-    expect(bad.accommodation_rows).toBe(2);
-    expect(bad.accommodations).toContain('json');
     const shuffled = cli.controls.find((entry) => entry.variant === 'shuffled')!;
     expect(shuffled.drift_judged).toBe(0);
     expect(shuffled.drift_unjudged).toBe(2);
@@ -367,9 +366,7 @@ describe('summary + scoreboard rendering', () => {
 
     const section = sectionText(markdown, 'claude-cli');
     // In the table itself, not only in a footnote.
-    expect(section).toContain('⚠︎ json');
     expect(section).toContain('+ 1 without usage');
-    expect(section).toContain('**accommodation**');
     expect(section).toContain('**missing usage**');
     expect(section).toContain('**unreported cost**');
     expect(section).toContain('**unjudged**');
@@ -405,7 +402,6 @@ describe('summary + scoreboard rendering', () => {
     const diagnostics = summary.diagnostics;
     expect(diagnostics.observations.find((entry) => entry.model === 'good')?.observation_count).toBe(3);
     expect(diagnostics.parse_note_samples[0]).toContain('unparseable reply');
-    expect(diagnostics.accommodations[0]).toEqual({ model: 'bad', accommodation: 'json', items: ['it-1'] });
     expect(diagnostics.skipped_result_rows).toHaveLength(2);
     expect(diagnostics.skipped_observe_records).toHaveLength(1);
     expect(diagnostics.error_rows).toHaveLength(1);
@@ -456,7 +452,6 @@ describe('rendering edge cases', () => {
       mem_search_calls: 1,
       drift_flag: false,
       judged: true,
-      accommodation: null,
       error: null,
       ...input,
     };
@@ -607,7 +602,6 @@ describe('run-vs-run diff mode', () => {
         mem_search_calls: 5,
         drift_flag: false,
         judged: true,
-        accommodation: null,
         error: null,
       },
     ];

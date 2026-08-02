@@ -25,13 +25,12 @@
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { loadConfig } from './config.js';
-import { defaultCorpusDir, listItems } from './corpus.js';
-import { createPortPool, type PortPool } from './fork.js';
+import { defaultCorpusDir, listItems } from './corpus-item.js';
 import { appendJsonl, readJsonl } from './jsonl.js';
 import type { MockDepsOptions } from './mocks.js';
 import { createMockDeps } from './mocks.js';
 import type { QueryModelFn } from './observe-runner.js';
-import { loadCorpusItems, runObserveStage, type LoadedItem } from './observe-stage.js';
+import { loadCorpusItem, runObserveStage, type LoadedItem } from './observe-stage.js';
 import { readJudgeCosts, readObserveRecords, runIdError } from './scoreboard.js';
 import {
   CONTROL_VARIANTS,
@@ -414,7 +413,6 @@ export interface RunOverrides {
   deps?: Partial<ExecuteStageDeps>;
   /** Observe + judge transport override (wins over --mock's provider). */
   query?: QueryModelFn;
-  portPool?: PortPool;
   log?: (message: string) => void;
 }
 
@@ -585,15 +583,17 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
   let items: LoadedItem[];
   try {
     spec = await loadRunSpec(flags.spec);
-    items = await loadCorpusItems(corpusDir, spec.corpus_items, { requireFrozen: true });
+    items = [];
+    for (const id of spec.corpus_items) {
+      items.push(await loadCorpusItem(corpusDir, id, { requireFrozen: true }));
+    }
   } catch (error: unknown) {
     console.error(`membench run: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
 
   const matrix = computeCallMatrix(spec);
-  const requestedForkConcurrency =
-    flags.forkConcurrency ?? spec.fork_concurrency ?? DEFAULT_FORK_CONCURRENCY;
+  const forkConcurrency = flags.forkConcurrency ?? spec.fork_concurrency ?? DEFAULT_FORK_CONCURRENCY;
   const observeConcurrency = flags.observeConcurrency ?? spec.observe_concurrency ?? 4;
 
   // Spec-level wiring check both paths need: the openrouter-agent lane has no
@@ -738,18 +738,7 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
 
   let deps: ExecuteStageDeps;
   let query: QueryModelFn | undefined;
-  const portPool = overrides.portPool ?? createPortPool();
   let mockFarmStop: (() => void) | undefined;
-
-  // Each live fork holds one port for its whole life, so more concurrent
-  // forks than ports would exhaust the pool mid-run.
-  const forkConcurrency = Math.max(1, Math.min(requestedForkConcurrency, portPool.size ?? Infinity));
-  if (forkConcurrency !== requestedForkConcurrency) {
-    log(
-      `note: fork concurrency capped at ${forkConcurrency} by the port pool ` +
-        `(${portPool.size} port(s) available; requested ${requestedForkConcurrency}).`,
-    );
-  }
 
   if (flags.mock) {
     const mocks = createMockDeps({ lanes: spec.executors, ...(overrides.mock ?? {}) });
@@ -757,7 +746,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
     query = overrides.query ?? mocks.query;
     deps = {
       executors: mocks.executors,
-      portPool,
       spawnWorker: mocks.spawnWorker,
       cloneRepo: mocks.cloneRepo,
       killTree: mocks.killTree,
@@ -774,7 +762,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       query = overrides.query;
       deps = {
         executors,
-        portPool,
         claudeMemRoot: config.claudeMemRoot,
         apiKey: config.openrouterApiKey,
         ...(query ? { query } : {}),
@@ -916,11 +903,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
     return preflight(perRun * context.inFlight, note);
   };
 
-  const ceilingCheck = (stage: string) => (itemId: string): 'continue' | 'stop' => {
-    log(`${stage} complete for ${itemId}. ${formatSpend(tracker)}`);
-    return preflight();
-  };
-
   try {
     // --- stage 1: observe --------------------------------------------------
     const observeResult = await runObserveStage({
@@ -931,16 +913,21 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       ...(config.openrouterApiKey && !flags.mock ? { apiKey: config.openrouterApiKey } : {}),
       timeoutS: spec.observe_timeout_s,
       concurrency: observeConcurrency,
-      onRecord: (itemId, model, record, reused) => {
-        // Reused records were already counted when the tracker was seeded
-        // from the run dir (--resume); counting them again would double-charge.
-        // Without that seeding they are counted here.
-        if (reused && flags.resume) return;
-        if (record.error) return; // a failed replay is an error record, not spend
-        tracker.add('obs', record.obs_cost_usd, `${itemId} × ${model}`);
+      governance: (event) => {
+        if (event.type === 'record') {
+          // Reused records were already counted when the tracker was seeded
+          // from the run dir (--resume); counting them again would
+          // double-charge. A failed replay is an error record, not spend.
+          if (!(event.reused && flags.resume) && !event.record.error) {
+            tracker.add('obs', event.record.obs_cost_usd, `${event.itemId} × ${event.model}`);
+          }
+          return 'continue';
+        }
+        if (event.type === 'item') {
+          log(`observe complete for ${event.itemId}. ${formatSpend(tracker)}`);
+        }
+        return preflight();
       },
-      beforeCall: preflight,
-      betweenItems: ceilingCheck('observe'),
       log,
     });
 
@@ -991,7 +978,10 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       concurrency: forkConcurrency,
       tracker,
       beforeCell: cellPreflight,
-      betweenItems: ceilingCheck('execute'),
+      betweenItems: (itemId) => {
+        log(`execute complete for ${itemId}. ${formatSpend(tracker)}`);
+        return preflight();
+      },
       log,
     });
 

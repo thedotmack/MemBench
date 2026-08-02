@@ -41,7 +41,7 @@ export const EMAIL_ALLOWLIST: readonly string[] = [
  * Matched case-insensitively (so "ChenglinWei97" and "chenglinwei97" both
  * hit). Append as corpus reviews surface more.
  */
-export const EXTRA_REDACTION_STRINGS: readonly string[] = [
+const EXTRA_REDACTION_STRINGS: readonly string[] = [
   'Jorge Rebuffo',
   'timvanmaurik7',
   'chenglinwei97',
@@ -49,7 +49,7 @@ export const EXTRA_REDACTION_STRINGS: readonly string[] = [
 
 /** One rule's replacements at one location (file + row/field path). */
 export interface Redaction {
-  /** Which rule fired, e.g. "sk-key", "home-path". */
+  /** Which rule fired, e.g. "sk-key", "username". */
   rule: string;
   /** Where the redaction landed, e.g. "transcript.jsonl row 12: .toolUseResult.stdout". */
   location: string;
@@ -68,16 +68,12 @@ interface Rule {
   keep?: (match: string) => boolean;
 }
 
-function escapeRegExp(literal: string): string {
-  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 /**
  * Ordered rule list (order matters: PEM blocks and JWTs are consumed before
  * the generic Bearer rule so each secret gets its most specific label; the
  * email rule runs before the extra-strings list so `<extra-string>@host`
  * redacts cleanly as one `[REDACTED:email]`; the bare-username catchall runs
- * last, after the path rewrites).
+ * last).
  */
 const RULES: readonly Rule[] = [
   {
@@ -126,25 +122,16 @@ const RULES: readonly Rule[] = [
     ? [
         {
           name: 'extra-string',
-          pattern: new RegExp(EXTRA_REDACTION_STRINGS.map(escapeRegExp).join('|'), 'gi'),
+          pattern: new RegExp(EXTRA_REDACTION_STRINGS.map((s) => RegExp.escape(s)).join('|'), 'gi'),
           replacement: '[REDACTED:name]',
         },
       ]
     : []),
   {
-    name: 'home-path',
-    pattern: /\/Users\/alexnewman/g,
-    replacement: '/Users/user',
-  },
-  {
-    // Claude Code's path-encoded project dir names (e.g. task output paths
-    // under /private/tmp/claude-501/-Users-alexnewman-...).
-    name: 'encoded-home-path',
-    pattern: /-Users-alexnewman/g,
-    replacement: '-Users-user',
-  },
-  {
-    // Catchall so `grep -rn "alexnewman" corpus/` ends empty (guard 10).
+    // Catchall so `grep -rn "alexnewman" corpus/` ends empty (guard 10). Also
+    // covers home paths (/Users/alexnewman → /Users/user) and Claude Code's
+    // path-encoded project dir names (-Users-alexnewman → -Users-user) —
+    // byte-identical output to dedicated path rules.
     name: 'username',
     pattern: /alexnewman/g,
     replacement: 'user',
@@ -157,15 +144,6 @@ const MAX_CONTEXTS_PER_ENTRY = 3;
 /** Collapse whitespace so a context snippet stays a one-line table cell. */
 function oneLine(snippet: string): string {
   return snippet.replace(/\s+/g, ' ').trim();
-}
-
-/** Apply every rule with no reporting — used to scrub context snippets. */
-function quietSanitize(input: string): string {
-  let output = input;
-  for (const rule of RULES) {
-    output = output.replace(rule.pattern, (match) => (rule.keep?.(match) ? match : rule.replacement));
-  }
-  return output;
 }
 
 /**
@@ -186,7 +164,9 @@ export function sanitizeString(input: string, location: string, report: Redactio
       if (contexts.length < MAX_CONTEXTS_PER_ENTRY) {
         const before = current.slice(Math.max(0, start - CONTEXT_RADIUS), start);
         const after = current.slice(last, last + CONTEXT_RADIUS);
-        contexts.push(quietSanitize(oneLine(before + rule.replacement + after)));
+        // Context snippets are re-sanitized with the full rule set (report
+        // thrown away) so a snippet never leaks an adjacent secret.
+        contexts.push(sanitizeString(oneLine(before + rule.replacement + after), '', []));
       }
     }
     output += current.slice(last);

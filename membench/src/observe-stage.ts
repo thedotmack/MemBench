@@ -6,7 +6,7 @@
  * Phase 2) and emit
  *   runs/<run_id>/obs/<item>/<model-slug>.json
  *     = {observations, parse_notes, usage_notes,
- *        obs_tokens_in, obs_tokens_out, obs_cost_usd, accommodation?, error?}
+ *        obs_tokens_in, obs_tokens_out, obs_cost_usd, error?}
  *
  * `error` is written ONLY when the replay itself failed (transport error,
  * timeout). It is an addition to the plan's field list, not a substitution:
@@ -28,7 +28,7 @@ import {
   firstHumanPrompt,
   type ToolCallRecord,
   type TranscriptRow,
-} from './corpus.js';
+} from './corpus-item.js';
 import { readJsonl } from './jsonl.js';
 import { runObserveItem, type ObserveToolCall, type QueryModelFn } from './observe-runner.js';
 import { isSafeCorpusItemId } from './spec.js';
@@ -61,15 +61,15 @@ export interface ObserveRecord {
   obs_tokens_in: number | null;
   obs_tokens_out: number | null;
   obs_cost_usd: number | null;
-  accommodation?: string;
   /** Present only when the replay failed; observations is then empty. */
   error?: string;
 }
 
 /**
- * Filesystem-safe slug for a model id, mirroring fork.ts variantSlug's
- * discipline: lossless names stay bare, any LOSSY cleaning appends the first
- * 8 hex of sha256(raw id) so `a/b` and `a-b` can never collide on disk.
+ * Filesystem-safe slug for a model id or variant name (fork.ts uses it for
+ * fork dir names too): lossless names stay bare, any LOSSY cleaning appends
+ * the first 8 hex of sha256(raw id) so `a/b` and `a-b` can never collide on
+ * disk.
  */
 export function modelSlug(model: string): string {
   const cleaned = model.replace(/[^a-zA-Z0-9._-]+/g, '-');
@@ -167,19 +167,6 @@ export async function loadCorpusItem(
   return { id: itemId, dir, provenance, contentHash };
 }
 
-/** Resolve every spec item (fails on the first bad one). */
-export async function loadCorpusItems(
-  corpusDir: string,
-  itemIds: string[],
-  options: { requireFrozen?: boolean } = {},
-): Promise<LoadedItem[]> {
-  const items: LoadedItem[] = [];
-  for (const id of itemIds) {
-    items.push(await loadCorpusItem(corpusDir, id, options));
-  }
-  return items;
-}
-
 // ---------------------------------------------------------------------------
 // Observe input assembly
 // ---------------------------------------------------------------------------
@@ -192,7 +179,7 @@ export async function loadCorpusItems(
  * number and an optional string, so nulls collapse here — 0 for the epoch
  * (the observation prompt renders it as a timestamp only) and absent cwd.
  */
-export async function buildObserveInput(item: LoadedItem) {
+async function buildObserveInput(item: LoadedItem) {
   const toolCalls = await readJsonl<ToolCallRecord>(join(item.dir, 'toolcalls.jsonl'));
   const transcript = await readJsonl<TranscriptRow>(join(item.dir, 'transcript.jsonl'));
   const userPrompt = firstHumanPrompt(transcript) ?? 'Work session';
@@ -216,7 +203,22 @@ export async function buildObserveInput(item: LoadedItem) {
 // Stage driver
 // ---------------------------------------------------------------------------
 
-export interface ObserveStageOptions {
+/**
+ * The single cost-governance hook's events:
+ *   - 'record' — a record landed (fresh or reused); fold its REAL reported
+ *     obs_cost_usd into the run's spend.
+ *   - 'call'   — pre-flight BEFORE a paid replay. 'stop' abandons the
+ *     remaining replays without spending; nothing is written for them, so
+ *     they are simply re-attempted on the next invocation.
+ *   - 'item'   — one item's models all completed. 'stop' halts the stage
+ *     between items; the partial run stays resumable.
+ */
+type ObserveGovernanceEvent =
+  | { type: 'record'; itemId: string; model: string; record: ObserveRecord; reused: boolean }
+  | { type: 'call' }
+  | { type: 'item'; itemId: string };
+
+interface ObserveStageOptions {
   items: LoadedItem[];
   models: string[];
   /** runs/<run_id>/ */
@@ -228,49 +230,21 @@ export interface ObserveStageOptions {
   timeoutS: number;
   /** Max concurrent (item, model) replays within one item. Default 4. */
   concurrency?: number;
-  /**
-   * Called as each record lands (fresh or reused) — cost governance folds the
-   * record's REAL reported obs_cost_usd into the run's spend here.
-   */
-  onRecord?: (itemId: string, model: string, record: ObserveRecord, reused: boolean) => void;
-  /**
-   * Cost-governance pre-flight, consulted BEFORE each replay. 'stop' abandons
-   * the remaining replays without spending; nothing is written for them, so
-   * they are simply re-attempted on the next invocation.
-   */
-  beforeCall?: () => 'continue' | 'stop';
-  /**
-   * Cost-governance hook, called after each item's models complete. Returning
-   * 'stop' halts the stage between items; the partial run stays resumable.
-   */
-  betweenItems?: (itemId: string) => Promise<'continue' | 'stop'> | 'continue' | 'stop';
+  /** Cost governance (see ObserveGovernanceEvent). */
+  governance?: (event: ObserveGovernanceEvent) => 'continue' | 'stop';
   log?: (message: string) => void;
 }
 
-export interface ObserveStageResult {
+interface ObserveStageResult {
   /** key = observeKey(itemId, model) */
   records: Map<string, ObserveRecord>;
   /** Items whose models were all attempted (or reused) before the stage ended. */
   itemsObserved: string[];
-  /** True when the betweenItems hook stopped the stage early. */
+  /** True when the governance hook stopped the stage early. */
   stopped: boolean;
 }
 
 const DEFAULT_OBSERVE_CONCURRENCY = 4;
-
-async function readExistingRecord(path: string): Promise<ObserveRecord | undefined> {
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(await Bun.file(path).text()) as ObserveRecord;
-  } catch {
-    return undefined;
-  }
-}
-
-async function writeRecord(path: string, record: ObserveRecord): Promise<void> {
-  mkdirSync(dirname(path), { recursive: true });
-  await Bun.write(path, JSON.stringify(record, null, 2) + '\n');
-}
 
 /**
  * Run stage 1 over (items × models). One item at a time; that item's models
@@ -291,9 +265,7 @@ export async function runObserveStage(options: ObserveStageOptions): Promise<Obs
     apiKey,
     timeoutS,
     concurrency = DEFAULT_OBSERVE_CONCURRENCY,
-    onRecord,
-    beforeCall,
-    betweenItems,
+    governance,
     log = () => {},
   } = options;
 
@@ -305,15 +277,22 @@ export async function runObserveStage(options: ObserveStageOptions): Promise<Obs
     const input = await buildObserveInput(item);
     await mapWithConcurrency(models, concurrency, async (model) => {
       const path = observeRecordPath(runDir, item.id, model);
-      const existing = await readExistingRecord(path);
+      let existing: ObserveRecord | undefined;
+      if (existsSync(path)) {
+        try {
+          existing = JSON.parse(await Bun.file(path).text()) as ObserveRecord;
+        } catch {
+          // Unreadable artifact — re-attempt the replay below.
+        }
+      }
       if (existing && !existing.error) {
         records.set(observeKey(item.id, model), existing);
-        onRecord?.(item.id, model, existing, true);
+        governance?.({ type: 'record', itemId: item.id, model, record: existing, reused: true });
         log(`observe: reusing ${item.id} × ${model} (${existing.observations.length} observations)`);
         return;
       }
       if (stoppedEarly) return;
-      if (beforeCall?.() === 'stop') {
+      if (governance?.({ type: 'call' }) === 'stop') {
         stoppedEarly = true;
         return;
       }
@@ -333,11 +312,9 @@ export async function runObserveStage(options: ObserveStageOptions): Promise<Obs
           obs_tokens_in: outcome.obs_tokens_in,
           obs_tokens_out: outcome.obs_tokens_out,
           obs_cost_usd: outcome.obs_cost_usd,
-          ...(outcome.accommodation ? { accommodation: outcome.accommodation } : {}),
         };
         log(
           `observe: ${item.id} × ${model} → ${record.observations.length} observations` +
-            `${record.accommodation ? ` (accommodation: ${record.accommodation})` : ''}` +
             `${record.parse_notes.length > 0 ? `, ${record.parse_notes.length} parse note(s)` : ''}`,
         );
       } catch (error: unknown) {
@@ -354,20 +331,18 @@ export async function runObserveStage(options: ObserveStageOptions): Promise<Obs
         };
         log(`observe: ${item.id} × ${model} FAILED: ${record.error}`);
       }
-      await writeRecord(path, record);
+      mkdirSync(dirname(path), { recursive: true });
+      await Bun.write(path, JSON.stringify(record, null, 2) + '\n');
       records.set(observeKey(item.id, model), record);
-      onRecord?.(item.id, model, record, false);
+      governance?.({ type: 'record', itemId: item.id, model, record, reused: false });
     });
 
     if (stoppedEarly) {
       return { records, itemsObserved, stopped: true };
     }
     itemsObserved.push(item.id);
-    if (betweenItems) {
-      const decision = await betweenItems(item.id);
-      if (decision === 'stop') {
-        return { records, itemsObserved, stopped: true };
-      }
+    if (governance?.({ type: 'item', itemId: item.id }) === 'stop') {
+      return { records, itemsObserved, stopped: true };
     }
   }
 

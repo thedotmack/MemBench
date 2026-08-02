@@ -15,9 +15,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computeContentHash } from '../src/corpus.ts';
+import { computeContentHash } from '../src/corpus-item.ts';
 import { costMain } from '../src/cost-table.ts';
-import { createPortPool, type PortPool } from '../src/fork.ts';
 import { readJsonl } from '../src/jsonl.ts';
 import type { ObserveRecord } from '../src/observe-stage.ts';
 import { publishMain } from '../src/publish.ts';
@@ -332,27 +331,6 @@ describe('mock end-to-end run', () => {
     expect(record.obs_cost_usd).toBeNull();
   });
 
-  test('the JSON accommodation surfaces on the obs record AND every row of that variant', async () => {
-    const code = await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-accom', '--mock'], {
-      mock: { query: { jsonAccommodationModels: ['mock/observer-b'] } },
-    });
-    expect(code).toBe(0);
-
-    const record = JSON.parse(
-      readFileSync(join(harness.runDir('e2e-accom'), 'obs', 'mini-001', 'mock-observer-b-2a31c6bb.json'), 'utf-8'),
-    ) as ObserveRecord;
-    expect(record.accommodation).toBe('json');
-    expect(record.observations.length).toBeGreaterThan(0);
-    expect(record.parse_notes.join(' ')).toContain('JSON accommodation');
-
-    const rows = await harness.rows('e2e-accom');
-    const accommodated = rows.filter((row) => row.variant === 'model:mock/observer-b');
-    expect(accommodated).toHaveLength(4);
-    expect(accommodated.every((row) => row.accommodation === 'json')).toBe(true);
-    // Only that model's rows are tagged — the others competed on XML.
-    expect(rows.filter((row) => row.accommodation !== undefined)).toHaveLength(4);
-  });
-
   test('a judge transport failure lands a row with judged:false, drift null and success false', async () => {
     const code = await harness.run(
       ['--spec', SPEC_TWO_ITEMS, '--run-id', 'e2e-judgefail', '--mock'],
@@ -591,25 +569,8 @@ describe('governance', () => {
     expect(output).toContain('abandoned unrun');
   });
 
-  test('a fork-preparation failure yields an error row and releases the port', async () => {
-    const acquired: number[] = [];
-    const released: number[] = [];
-    const inner = createPortPool(39500, 8, false);
-    const countingPool: PortPool = {
-      size: 8,
-      acquire: () => {
-        const port = inner.acquire();
-        acquired.push(port);
-        return port;
-      },
-      release: (port: number) => {
-        released.push(port);
-        inner.release(port);
-      },
-    };
-
+  test('a fork-preparation failure yields an error row per cell', async () => {
     const code = await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-forkfail', '--mock'], {
-      portPool: countingPool,
       deps: {
         spawnWorker: () => {
           throw new Error('injected worker spawn failure');
@@ -627,9 +588,6 @@ describe('governance', () => {
       expect(row.judged).toBe(false);
       expect(row.drift_flag).toBeNull();
     }
-    // Every acquired port came back to the pool — no leak across 20 failures.
-    expect(acquired.length).toBe(20);
-    expect(released.length).toBe(20);
   });
 
   test('unknown cost is surfaced, never treated as $0', async () => {

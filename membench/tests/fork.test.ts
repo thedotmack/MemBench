@@ -14,22 +14,20 @@ import {
   ORACLE_OBSERVATION_CONCEPTS,
   ORACLE_OBSERVATION_TYPE,
   parseOracleObservations,
-  shuffledSourceMap,
 } from '../src/controls.ts';
 import {
   ForkError,
   buildSeedPayload,
   buildWorkerEnv,
   cloneRepoAtCommit,
-  createPortPool,
+  freePort,
   prepareFork,
   teardownFork,
-  variantSlug,
-  type PortPool,
   type PreparedFork,
   type SpawnWorkerFn,
   type WorkerHandle,
 } from '../src/fork.ts';
+import { modelSlug } from '../src/observe-stage.ts';
 import type { CorpusItem } from '../src/types.ts';
 import type { ParsedObservation } from '../src/vendor/parser.ts';
 
@@ -181,18 +179,6 @@ function startStubWorker(
   return stub;
 }
 
-/** Pool handing out exactly the stub's port, recording releases. */
-function stubPool(port: number): PortPool & { released: number[] } {
-  const released: number[] = [];
-  return {
-    released,
-    acquire: () => port,
-    release: (released_port: number) => {
-      released.push(released_port);
-    },
-  };
-}
-
 function fakeWorker(overrides: Partial<WorkerHandle> = {}): WorkerHandle & { kills: (number | NodeJS.Signals | undefined)[] } {
   const kills: (number | NodeJS.Signals | undefined)[] = [];
   return {
@@ -208,7 +194,6 @@ function fakeWorker(overrides: Partial<WorkerHandle> = {}): WorkerHandle & { kil
 
 interface ForkHarness {
   stub: StubWorker;
-  pool: ReturnType<typeof stubPool>;
   worker: ReturnType<typeof fakeWorker>;
   spawns: number;
   killed: WorkerHandle[];
@@ -218,12 +203,10 @@ interface ForkHarness {
 
 function makeHarness(stubOptions: Parameters<typeof startStubWorker>[0] = {}): ForkHarness {
   const stub = startStubWorker(stubOptions);
-  const pool = stubPool(stub.port);
   const worker = fakeWorker();
   const killed: WorkerHandle[] = [];
   const harness: ForkHarness = {
     stub,
-    pool,
     worker,
     spawns: 0,
     killed,
@@ -235,7 +218,7 @@ function makeHarness(stubOptions: Parameters<typeof startStubWorker>[0] = {}): F
       };
       return prepareFork(item, variant, harness.runsDir, {
         runId: 'run-001',
-        portPool: pool,
+        port: stub.port,
         ...(observations !== undefined ? { observations } : {}),
         spawnWorker,
         killTree: async (target) => {
@@ -261,7 +244,7 @@ describe('prepareFork against a stub worker', () => {
     const fork = await harness.prepare(item, 'model:test/observer-1', [OBS_A, OBS_B]);
     try {
       // Fork layout: <runsDir>/<runId>/forks/<item>/<variant-slug>/{mem,home,repo}
-      const forkDir = join(harness.runsDir, 'run-001', 'forks', 'item-e2e', variantSlug('model:test/observer-1'));
+      const forkDir = join(harness.runsDir, 'run-001', 'forks', 'item-e2e', modelSlug('model:test/observer-1'));
       expect(fork.dataDir).toBe(join(forkDir, 'mem'));
       expect(fork.homeDir).toBe(join(forkDir, 'home'));
       expect(fork.repoDir).toBe(join(forkDir, 'repo'));
@@ -366,14 +349,13 @@ describe('prepareFork against a stub worker', () => {
     harness.stub.stop();
   });
 
-  test('teardown kills the worker tree, releases the port, and prunes mem/ only on the happy path', async () => {
+  test('teardown kills the worker tree and prunes mem/ only on the happy path', async () => {
     const harness = makeHarness();
     const item = makeItemDir('item-teardown', repoPath, pinnedCommit);
 
     const kept = await harness.prepare(item, 'oracle', [OBS_A]);
     await teardownFork(kept, { keepData: true });
     expect(harness.killed).toHaveLength(1);
-    expect(harness.pool.released).toEqual([harness.stub.port]);
     expect(existsSync(kept.dataDir)).toBe(true); // audit trail kept
 
     // A different variant of the same item — the kept-for-audit oracle mem/
@@ -405,16 +387,15 @@ describe('prepareFork against a stub worker', () => {
     harness.stub.stop();
   });
 
-  test('seed failure (500 from /api/import) tears down: worker killed, port released, mem/ kept', async () => {
+  test('seed failure (500 from /api/import) tears down: worker killed, mem/ kept', async () => {
     const stub = startStubWorker({ importFailures: 1 });
-    const pool = stubPool(stub.port);
     const killed: WorkerHandle[] = [];
     const item = makeItemDir('item-seedfail', repoPath, pinnedCommit);
     const runsDir = tempDir('runs-seedfail');
 
     const attempt = prepareFork(item, 'oracle', runsDir, {
       runId: 'run-001',
-      portPool: pool,
+      port: stub.port,
       observations: [OBS_A],
       spawnWorker: () => fakeWorker(),
       killTree: async (target) => {
@@ -424,16 +405,14 @@ describe('prepareFork against a stub worker', () => {
     });
     await expect(attempt).rejects.toThrow('POST /api/import failed: 500');
     expect(killed).toHaveLength(1);
-    expect(pool.released).toEqual([stub.port]);
     expect(stub.importBodies).toHaveLength(0); // the 500 attempt was not recorded as a seed
     const dataDir = join(runsDir, 'run-001', 'forks', 'item-seedfail', 'oracle', 'mem');
     expect(existsSync(dataDir)).toBe(true); // kept for audit
     stub.stop();
   });
 
-  test('readiness timeout tears down (kill + keep mem/ + release port) and rethrows', async () => {
+  test('readiness timeout tears down (kill + keep mem/) and rethrows', async () => {
     const stub = startStubWorker({ readinessFailures: 1_000_000 });
-    const pool = stubPool(stub.port);
     const worker = fakeWorker();
     const killed: WorkerHandle[] = [];
     const item = makeItemDir('item-notready', repoPath, pinnedCommit);
@@ -441,7 +420,7 @@ describe('prepareFork against a stub worker', () => {
 
     const attempt = prepareFork(item, 'oracle', runsDir, {
       runId: 'run-001',
-      portPool: pool,
+      port: stub.port,
       observations: [OBS_A],
       spawnWorker: () => worker,
       killTree: async (target) => {
@@ -451,7 +430,6 @@ describe('prepareFork against a stub worker', () => {
     });
     await expect(attempt).rejects.toThrow('not ready within');
     expect(killed).toHaveLength(1);
-    expect(pool.released).toEqual([stub.port]);
     const dataDir = join(runsDir, 'run-001', 'forks', 'item-notready', 'oracle', 'mem');
     expect(existsSync(dataDir)).toBe(true); // kept for audit
     expect(stub.readinessPolls).toBeGreaterThan(0);
@@ -460,11 +438,10 @@ describe('prepareFork against a stub worker', () => {
 
   test('fails fast when the worker process exits before readiness', async () => {
     const stub = startStubWorker({ readinessFailures: 1_000_000 });
-    const pool = stubPool(stub.port);
     const item = makeItemDir('item-earlyexit', repoPath, pinnedCommit);
     const attempt = prepareFork(item, 'oracle', tempDir('runs-earlyexit'), {
       runId: 'run-001',
-      portPool: pool,
+      port: stub.port,
       observations: [OBS_A],
       spawnWorker: () => fakeWorker({ exited: Promise.resolve(1) }),
       killTree: async () => {},
@@ -476,10 +453,8 @@ describe('prepareFork against a stub worker', () => {
 
   test('guard 4: refuses a fork rooted inside the user\'s real ~/.claude-mem', async () => {
     const item = makeItemDir('item-guard', repoPath, pinnedCommit);
-    const pool = stubPool(1); // never reached
     const attempt = prepareFork(item, 'none', join(homedir(), '.claude-mem', 'runs'), {
       runId: 'run-001',
-      portPool: pool,
       spawnWorker: () => fakeWorker(),
       killTree: async () => {},
     });
@@ -547,46 +522,20 @@ describe('buildWorkerEnv', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Port pool
+// freePort
 // ---------------------------------------------------------------------------
 
-describe('createPortPool', () => {
-  // acquire() is fully synchronous, so genuine parallel acquisition cannot
-  // exist on the single-threaded event loop — the isolation property is
-  // "no await between pick and mark-in-use". This exercises unique
-  // allocation across interleaved async callers (microtask interleaving,
-  // the closest JS gets to concurrency here).
-  test('allocates unique ports across interleaved async acquisitions', async () => {
-    const pool = createPortPool(45_000, 64, false);
-    const ports = await Promise.all(
-      Array.from({ length: 64 }, () => Promise.resolve().then(() => pool.acquire())),
-    );
-    expect(new Set(ports).size).toBe(64);
-  });
-
-  test('throws when exhausted; release makes a port reusable', () => {
-    const pool = createPortPool(45_100, 2, false);
-    const first = pool.acquire();
-    pool.acquire();
-    expect(() => pool.acquire()).toThrow(ForkError);
-    pool.release(first);
-    expect(pool.acquire()).toBe(first);
-  });
-
-  test('bind-probe skips ports already busy on the host', () => {
-    const busy = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response('') });
-    const busyPort = busy.port!;
-    try {
-      const pool = createPortPool(busyPort, 3, true);
-      expect(pool.acquire()).not.toBe(busyPort);
-    } finally {
-      busy.stop(true);
-    }
+describe('freePort', () => {
+  test('returns an OS-assigned port that is immediately bindable', () => {
+    const port = freePort();
+    expect(port).toBeGreaterThan(0);
+    const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: () => new Response('') });
+    server.stop(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// buildSeedPayload / variantSlug / clone
+// buildSeedPayload / modelSlug / clone
 // ---------------------------------------------------------------------------
 
 describe('buildSeedPayload', () => {
@@ -625,19 +574,19 @@ describe('buildSeedPayload', () => {
   });
 });
 
-describe('variantSlug', () => {
+describe('modelSlug (shared variant/model slug)', () => {
   test('makes model variants path-safe and leaves controls alone', () => {
     // Lossy cleaning appends an 8-hex disambiguator.
-    expect(variantSlug('model:openai/gpt-4o')).toMatch(/^model-openai-gpt-4o-[0-9a-f]{8}$/);
-    expect(variantSlug('none')).toBe('none');
-    expect(variantSlug('oracle')).toBe('oracle');
-    expect(variantSlug('shuffled')).toBe('shuffled');
+    expect(modelSlug('model:openai/gpt-4o')).toMatch(/^model-openai-gpt-4o-[0-9a-f]{8}$/);
+    expect(modelSlug('none')).toBe('none');
+    expect(modelSlug('oracle')).toBe('oracle');
+    expect(modelSlug('shuffled')).toBe('shuffled');
   });
 
   test('distinct model ids that clean identically cannot collide', () => {
-    expect(variantSlug('model:a/b')).not.toBe(variantSlug('model:a-b'));
+    expect(modelSlug('model:a/b')).not.toBe(modelSlug('model:a-b'));
     // Deterministic across calls.
-    expect(variantSlug('model:a/b')).toBe(variantSlug('model:a/b'));
+    expect(modelSlug('model:a/b')).toBe(modelSlug('model:a/b'));
   });
 });
 
@@ -716,23 +665,5 @@ describe('parseOracleObservations', () => {
 
   test('throws when no sections parse (a ceiling that seeds nothing is a corpus bug)', () => {
     expect(() => parseOracleObservations('no headings here', 'bad-item')).toThrow(ControlSynthesisError);
-  });
-});
-
-describe('shuffledSourceMap', () => {
-  test('fixed mapping: sorted ids rotated by 1, independent of input order', () => {
-    const mapping = shuffledSourceMap(['b-item', 'c-item', 'a-item']);
-    expect(mapping).toEqual({ 'a-item': 'b-item', 'b-item': 'c-item', 'c-item': 'a-item' });
-    // Deterministic across shuffled input orderings.
-    expect(shuffledSourceMap(['c-item', 'a-item', 'b-item'])).toEqual(mapping);
-    // No item ever donates to itself.
-    for (const [target, source] of Object.entries(mapping)) {
-      expect(target).not.toBe(source);
-    }
-  });
-
-  test('rejects <2 items and duplicate ids', () => {
-    expect(() => shuffledSourceMap(['only'])).toThrow(ControlSynthesisError);
-    expect(() => shuffledSourceMap(['a', 'a'])).toThrow(ControlSynthesisError);
   });
 });

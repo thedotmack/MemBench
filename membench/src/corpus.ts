@@ -1,6 +1,7 @@
 /**
  * Corpus builder pipeline — plan Phase 3 (§0.1 "Corpus data sources", §0.3,
- * §0.2 guards 9-10).
+ * §0.2 guards 9-10). AUTHORING/CLI side only: the run path reads frozen items
+ * through corpus-item.ts and never imports this file (or `bun:sqlite`).
  *
  * Sub-actions (wired as `membench corpus <action>`):
  *   candidates — list N→N+1 session pairs from the live claude-mem DB
@@ -16,60 +17,44 @@
  */
 
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve, sep } from 'node:path';
+import { basename, join, resolve } from 'node:path';
+import {
+  HASH_EXCLUDED,
+  REQUIRED_FILES,
+  assertOutsideClaudeMem,
+  computeContentHash,
+  defaultCorpusDir,
+  firstHumanPrompt,
+  listItems,
+  walkFiles,
+  type ContentBlock,
+  type ToolCallRecord,
+  type TranscriptRow,
+} from './corpus-item.js';
 import { readJsonl } from './jsonl.js';
 import { SANITIZER_VERSION, sanitizeString, sanitizeValue, type Redaction } from './sanitize.js';
 
 export class CorpusBuildError extends Error {}
 
 /** Claude-mem's own observer runs — never corpus material (guard 9). */
-export const OBSERVER_SESSIONS_DIR = '-Users-alexnewman--claude-mem-observer-sessions';
+const OBSERVER_SESSIONS_DIR = '-Users-alexnewman--claude-mem-observer-sessions';
 
 /**
  * Draft markers the builder stamps into stub files. Deliberately distinctive
  * strings: freeze scans every content file for them, and plain "TODO" would
  * false-positive on real source code inside transcript.jsonl.
  */
-export const TODO_MARKER = 'MEMBENCH:TODO';
-export const DRAFT_MARKER = 'MEMBENCH:DRAFT';
+const TODO_MARKER = 'MEMBENCH:TODO';
+const DRAFT_MARKER = 'MEMBENCH:DRAFT';
 
-/** The 7 content files of a corpus item (provenance.json is the 8th, written by build/freeze). */
-export const REQUIRED_FILES = [
-  'transcript.jsonl',
-  'toolcalls.jsonl',
-  'repo.lock',
-  'task.md',
-  'check.sh',
-  'success.md',
-  'oracle.md',
-] as const;
-
-/** Excluded from the content hash: the hash lives in provenance.json, and the report is review-only. */
-const HASH_EXCLUDED = new Set(['provenance.json', 'sanitization-report.md']);
-
-export function defaultDbPath(): string {
+function defaultDbPath(): string {
   return join(homedir(), '.claude-mem', 'claude-mem.db');
 }
 
-export function defaultProjectsDir(): string {
+function defaultProjectsDir(): string {
   return join(homedir(), '.claude', 'projects');
-}
-
-/**
- * Repo-root corpus/ resolved from this file's location (membench/src/), not
- * the cwd — so `bun src/cli.ts corpus list` works from membench/.
- */
-export function defaultCorpusDir(): string {
-  return join(import.meta.dir, '..', '..', 'corpus');
-}
-
-/** Write via temp-file + rename so an interruption never leaves a truncated file. */
-async function writeFileAtomic(path: string, text: string): Promise<void> {
-  const tmp = `${path}.tmp`;
-  await Bun.write(tmp, text);
-  renameSync(tmp, path);
 }
 
 /**
@@ -81,48 +66,9 @@ function openLiveDb(dbPath: string): Database {
   return new Database(dbPath, { readonly: true });
 }
 
-/** Refuse any write path that resolves into ~/.claude-mem (guard 10). */
-function assertOutsideClaudeMem(path: string): void {
-  const target = resolve(path);
-  const forbidden = join(homedir(), '.claude-mem');
-  if (target === forbidden || target.startsWith(forbidden + sep)) {
-    throw new CorpusBuildError(`refusing to write inside ${forbidden}: ${target}`);
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Transcript row model (shapes verified against a real transcript,
-// dac6a5b7-… in -Users-alexnewman-Scripts-claude-mem-pro)
+// Transcript filtering
 // ---------------------------------------------------------------------------
-
-export interface ContentBlock {
-  type?: string;
-  /** tool_use block id (e.g. "toolu_01…"). */
-  id?: string;
-  /** tool_use tool name. */
-  name?: string;
-  input?: unknown;
-  text?: string;
-  /** tool_result back-reference to the tool_use block id. */
-  tool_use_id?: string;
-  content?: unknown;
-  [key: string]: unknown;
-}
-
-export interface TranscriptRow {
-  type?: string;
-  uuid?: string;
-  sessionId?: string;
-  timestamp?: string;
-  cwd?: string;
-  gitBranch?: string;
-  origin?: { kind?: string };
-  /** Tool-result user rows: uuid of the assistant row that issued the tool_use. */
-  sourceToolAssistantUUID?: string;
-  toolUseResult?: unknown;
-  message?: { role?: string; content?: unknown };
-  [key: string]: unknown;
-}
 
 /**
  * Keep: metadata rows (system, mode, attachment, …), human user rows
@@ -141,49 +87,9 @@ export function filterTranscriptRows(rows: TranscriptRow[]): TranscriptRow[] {
   });
 }
 
-/** Text of a message.content that may be a plain string or a block array. */
-export function textOfMessageContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return (content as ContentBlock[])
-      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-      .map((block) => block.text as string)
-      .join('\n');
-  }
-  return '';
-}
-
-/** First human prompt in a transcript (fallback task source, plan §0.1). */
-export function firstHumanPrompt(rows: TranscriptRow[]): string | null {
-  for (const row of rows) {
-    if (row.type === 'user' && row.origin?.kind === 'human') {
-      const text = textOfMessageContent(row.message?.content);
-      if (text.trim()) return text;
-    }
-  }
-  return null;
-}
-
-function epochMs(timestamp: string | undefined): number | null {
-  if (!timestamp) return null;
-  const parsed = Date.parse(timestamp);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
 // ---------------------------------------------------------------------------
 // Tool call extraction
 // ---------------------------------------------------------------------------
-
-/** One executor tool call for observe replay. */
-export interface ToolCallRecord {
-  tool_name: string;
-  tool_input: unknown;
-  /** toolUseResult of the paired result row (fallback: its tool_result content); null when unpaired (e.g. interrupted). */
-  tool_output: unknown;
-  /** Milliseconds since epoch of the result row (fallback: the tool_use's assistant row); null when untimestamped. */
-  created_at_epoch: number | null;
-  cwd: string | null;
-}
 
 function toolResultBlock(row: TranscriptRow, toolUseId: string): ContentBlock | undefined {
   const content = row.message?.content;
@@ -206,6 +112,11 @@ function hasToolResultBlocks(row: TranscriptRow): boolean {
  * against a real transcript).
  */
 export function extractToolCalls(rows: TranscriptRow[]): ToolCallRecord[] {
+  const epochMs = (timestamp: string | undefined): number | null => {
+    const parsed = timestamp ? Date.parse(timestamp) : NaN;
+    return Number.isNaN(parsed) ? null : parsed;
+  };
+
   const resultsByAssistant = new Map<string, TranscriptRow[]>();
   for (const row of rows) {
     if (row.type !== 'user' || typeof row.sourceToolAssistantUUID !== 'string') continue;
@@ -249,7 +160,7 @@ export function extractToolCalls(rows: TranscriptRow[]): ToolCallRecord[] {
 // Repo pinning (plan §0.3: no commit SHA exists in any data source)
 // ---------------------------------------------------------------------------
 
-export interface RepoLock {
+interface RepoLock {
   url: string;
   commit: string;
   branch: string;
@@ -260,23 +171,9 @@ export interface RepoLock {
 /** Injectable for tests; the default shells out to git. */
 export type GitRunner = (args: string[]) => { ok: boolean; stdout: string };
 
-export function defaultGitRunner(args: string[]): { ok: boolean; stdout: string } {
+function defaultGitRunner(args: string[]): { ok: boolean; stdout: string } {
   const result = Bun.spawnSync(['git', ...args], { stdout: 'pipe', stderr: 'pipe' });
   return { ok: result.exitCode === 0, stdout: result.stdout.toString().trim() };
-}
-
-function mostFrequent(values: string[]): string | null {
-  const counts = new Map<string, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  let best: string | null = null;
-  let bestCount = 0;
-  for (const [value, count] of counts) {
-    if (count > bestCount) {
-      best = value;
-      bestCount = count;
-    }
-  }
-  return best;
 }
 
 /** Last 40-hex SHA mentioned in any Bash tool result stdout (fallback pinning). */
@@ -304,7 +201,9 @@ export function pinRepo(
   git: GitRunner = defaultGitRunner,
 ): { lock: Omit<RepoLock, 'cwd_at_recording'>; realCwd: string } {
   const cwds = rows.map((row) => row.cwd).filter((cwd): cwd is string => typeof cwd === 'string');
-  const realCwd = mostFrequent(cwds);
+  // Most frequent cwd; stable sort keeps first-seen ahead on ties.
+  const realCwd =
+    [...Map.groupBy(cwds, (cwd) => cwd).entries()].sort((a, b) => b[1].length - a[1].length)[0]?.[0] ?? null;
   if (!realCwd) {
     throw new CorpusBuildError('cannot pin repo: no row in the transcript carries a cwd');
   }
@@ -345,7 +244,7 @@ export function pinRepo(
 // Candidate listing (live DB, read-only)
 // ---------------------------------------------------------------------------
 
-export interface CandidatePair {
+interface CandidatePair {
   project: string;
   session_n: string;
   session_n_started: string;
@@ -459,7 +358,7 @@ export async function listCandidates(options: {
 // ---------------------------------------------------------------------------
 
 /** DB-resolved facts about a session pair, gathered before buildItem runs. */
-export interface BuildInputs {
+interface BuildInputs {
   sessionId: string;
   projectSlug: string;
   nextSessionId: string;
@@ -514,7 +413,7 @@ export async function resolveBuildInputs(
   }
 }
 
-export interface BuildItemOptions {
+interface BuildItemOptions {
   transcriptPath: string;
   outDir: string;
   meta: {
@@ -528,7 +427,7 @@ export interface BuildItemOptions {
   git?: GitRunner;
 }
 
-export interface BuildSummary {
+interface BuildSummary {
   itemId: string;
   outDir: string;
   rowsTotal: number;
@@ -618,7 +517,7 @@ function renderSanitizationReport(itemId: string, meta: BuildItemOptions['meta']
  */
 export async function buildItem(options: BuildItemOptions): Promise<BuildSummary> {
   const { transcriptPath, outDir, meta, taskPrompt } = options;
-  assertOutsideClaudeMem(outDir);
+  assertOutsideClaudeMem(outDir, CorpusBuildError);
   const itemId = basename(resolve(outDir));
 
   const provenancePath = join(outDir, 'provenance.json');
@@ -697,7 +596,7 @@ export async function buildItem(options: BuildItemOptions): Promise<BuildSummary
 // Re-sanitize (sanitizer version upgrades over already-built items)
 // ---------------------------------------------------------------------------
 
-export interface ResanitizeSummary {
+interface ResanitizeSummary {
   itemId: string;
   redactions: Redaction[];
   previousSanitizerVersion: number | null;
@@ -718,7 +617,7 @@ export interface ResanitizeSummary {
  * must be re-frozen afterwards.
  */
 export async function resanitizeItem(dir: string): Promise<ResanitizeSummary> {
-  assertOutsideClaudeMem(dir);
+  assertOutsideClaudeMem(dir, CorpusBuildError);
   if (!existsSync(dir)) {
     throw new CorpusBuildError(`no such item dir: ${dir}`);
   }
@@ -745,13 +644,12 @@ export async function resanitizeItem(dir: string): Promise<ResanitizeSummary> {
   provenance.sanitizer_version = SANITIZER_VERSION;
   provenance.content_hash = null;
 
-  // Clear the frozen hash FIRST, and write every file via temp+rename: an
-  // interruption mid-rewrite can then never leave a stale "frozen" hash
-  // pointing at truncated data files.
-  await writeFileAtomic(provenancePath, JSON.stringify(provenance, null, 2) + '\n');
-  await writeFileAtomic(join(dir, 'transcript.jsonl'), cleanRows.map((row) => JSON.stringify(row)).join('\n') + '\n');
-  await writeFileAtomic(join(dir, 'toolcalls.jsonl'), cleanCalls.map((r) => JSON.stringify(r)).join('\n') + '\n');
-  await writeFileAtomic(join(dir, 'repo.lock'), JSON.stringify(cleanLock, null, 2) + '\n');
+  // Clear the frozen hash FIRST: an interruption mid-rewrite can then never
+  // leave a "frozen" hash pointing at half-rewritten data files.
+  await Bun.write(provenancePath, JSON.stringify(provenance, null, 2) + '\n');
+  await Bun.write(join(dir, 'transcript.jsonl'), cleanRows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+  await Bun.write(join(dir, 'toolcalls.jsonl'), cleanCalls.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  await Bun.write(join(dir, 'repo.lock'), JSON.stringify(cleanLock, null, 2) + '\n');
 
   const reportPath = join(dir, 'sanitization-report.md');
   const existingRaw = existsSync(reportPath) ? await Bun.file(reportPath).text() : '';
@@ -767,7 +665,7 @@ export async function resanitizeItem(dir: string): Promise<ResanitizeSummary> {
     '- files re-sanitized: transcript.jsonl, toolcalls.jsonl, repo.lock (hand-authored files untouched)',
     ...renderRedactionBody(report),
   ].join('\n');
-  await writeFileAtomic(reportPath, existing + section + '\n');
+  await Bun.write(reportPath, existing + section + '\n');
 
   return { itemId, redactions: report, previousSanitizerVersion, clearedHash };
 }
@@ -776,41 +674,7 @@ export async function resanitizeItem(dir: string): Promise<ResanitizeSummary> {
 // Freeze
 // ---------------------------------------------------------------------------
 
-function walkFiles(dir: string, prefix = ''): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    // Skip dotfiles (.DS_Store and friends): OS droppings must not perturb
-    // the content hash or the freeze scans.
-    if (entry.name.startsWith('.')) continue;
-    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) {
-      files.push(...walkFiles(join(dir, entry.name), relative));
-    } else if (entry.isFile()) {
-      files.push(relative);
-    }
-  }
-  return files.sort();
-}
-
-/**
- * Content hash of an item dir: sha256 over the sorted relative file list,
- * each contributing `path\0bytes\0` — excluding provenance.json (which holds
- * the hash) and sanitization-report.md (review-only). Deterministic, so
- * re-freezing an unchanged item reproduces the same hash.
- */
-export async function computeContentHash(dir: string): Promise<string> {
-  const hasher = new Bun.CryptoHasher('sha256');
-  for (const relative of walkFiles(dir)) {
-    if (HASH_EXCLUDED.has(relative)) continue;
-    hasher.update(relative);
-    hasher.update('\0');
-    hasher.update(await Bun.file(join(dir, relative)).arrayBuffer());
-    hasher.update('\0');
-  }
-  return hasher.digest('hex');
-}
-
-export interface FreezeResult {
+interface FreezeResult {
   itemId: string;
   hash: string;
   /** True when the item was already frozen with this same hash (idempotent re-freeze). */
@@ -818,7 +682,7 @@ export interface FreezeResult {
 }
 
 export async function freezeItem(dir: string): Promise<FreezeResult> {
-  assertOutsideClaudeMem(dir);
+  assertOutsideClaudeMem(dir, CorpusBuildError);
   if (!existsSync(dir)) {
     throw new CorpusBuildError(`no such item dir: ${dir}`);
   }
@@ -867,50 +731,6 @@ export async function freezeItem(dir: string): Promise<FreezeResult> {
   provenance.content_hash = hash;
   await Bun.write(provenancePath, JSON.stringify(provenance, null, 2) + '\n');
   return { itemId: basename(resolve(dir)), hash, unchanged: previous === hash };
-}
-
-// ---------------------------------------------------------------------------
-// List
-// ---------------------------------------------------------------------------
-
-export interface ItemStatus {
-  id: string;
-  /** Presence of each of the 7 required content files. */
-  files: Record<string, boolean>;
-  complete: boolean;
-  frozen: boolean;
-  hash: string | null;
-}
-
-export async function listItems(corpusDir: string): Promise<ItemStatus[]> {
-  if (!existsSync(corpusDir)) return [];
-  const statuses: ItemStatus[] = [];
-  for (const entry of readdirSync(corpusDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) continue;
-    const dir = join(corpusDir, entry.name);
-    const files: Record<string, boolean> = {};
-    for (const name of REQUIRED_FILES) {
-      files[name] = existsSync(join(dir, name));
-    }
-    let hash: string | null = null;
-    const provenancePath = join(dir, 'provenance.json');
-    if (existsSync(provenancePath)) {
-      try {
-        const provenance = JSON.parse(await Bun.file(provenancePath).text()) as { content_hash?: unknown };
-        hash = typeof provenance.content_hash === 'string' ? provenance.content_hash : null;
-      } catch {
-        hash = null;
-      }
-    }
-    statuses.push({
-      id: entry.name,
-      files,
-      complete: Object.values(files).every(Boolean),
-      frozen: hash !== null,
-      hash,
-    });
-  }
-  return statuses;
 }
 
 // ---------------------------------------------------------------------------

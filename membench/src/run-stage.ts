@@ -38,7 +38,6 @@ import {
   prepareFork,
   teardownFork,
   type CloneRepoFn,
-  type PortPool,
   type PreparedFork,
   type SpawnWorkerFn,
   type WorkerHandle,
@@ -137,9 +136,8 @@ export interface ShuffledSource {
  * The shuffled control's FIXED donor mapping, recorded verbatim in the run
  * manifest.
  *
- *  - ≥2 items in the run: controls.ts shuffledSourceMap (sorted ids rotated
- *    by 1) and the donor's FIRST observer model — a genuine "another
- *    session's model notes" control.
+ *  - ≥2 items in the run: sorted item ids rotated by 1 and the donor's FIRST
+ *    observer model — a genuine "another session's model notes" control.
  *  - 1 item in the run: no in-run donor exists, so the donor is the next
  *    frozen corpus item (sorted, wrapping) and its oracle.md supplies the
  *    notes. Still another session's notes; deterministic; declared in the
@@ -181,8 +179,6 @@ export interface VariantPlan {
   observations?: ParsedObservation[];
   /** Set when the variant cannot be forked — its cells become error rows. */
   blocked?: string;
-  /** accommodation recorded by the observe stage for this model, if any. */
-  accommodation?: string;
 }
 
 export interface BuildVariantPlansOptions {
@@ -212,7 +208,6 @@ export async function buildVariantPlans(options: BuildVariantPlansOptions): Prom
       plan.blocked = `observe failed for ${item.id} × ${model}: ${record.error}`;
     } else {
       plan.observations = record.observations;
-      if (record.accommodation) plan.accommodation = record.accommodation;
     }
     plans.push(plan);
   }
@@ -295,7 +290,6 @@ export function rowKey(row: {
 export interface ExecuteStageDeps {
   /** One Executor per lane in the spec. */
   executors: Partial<Record<ExecutorName, Executor>>;
-  portPool: PortPool;
   /** prepareFork seams — mocked offline. */
   spawnWorker?: SpawnWorkerFn;
   cloneRepo?: CloneRepoFn;
@@ -519,7 +513,6 @@ export async function runCell(cell: RunCell, context: RunCellContext): Promise<R
     // not read as "no drift" (tri-state, Phase 6 review).
     drift_flag: null,
     judged: false,
-    ...(plan.accommodation ? { accommodation: plan.accommodation } : {}),
   };
 
   if (plan.blocked) {
@@ -549,7 +542,6 @@ export async function runCell(cell: RunCell, context: RunCellContext): Promise<R
     }
     fork = await prepareFork(item, plan.variant, runsDir, {
       runId,
-      portPool: deps.portPool,
       // Every fork-run gets its own directory: k repetitions × executor lanes
       // all share (item, variant) and would otherwise collide.
       cellLabel,

@@ -72,7 +72,7 @@ describe('queryModel — request shape', () => {
     expect(result.servedModel).toBe('test/model-1-served');
   });
 
-  test('forwards response_format when the JSON accommodation asks for it', async () => {
+  test('forwards response_format when a caller asks for JSON output', async () => {
     const fetchMock = mock(() => Promise.resolve(okResponse()));
     global.fetch = fetchMock as unknown as typeof fetch;
 

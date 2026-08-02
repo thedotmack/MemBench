@@ -20,7 +20,7 @@
  *     (:221) is always true here.
  *   - Retry-dedup header renamed x-claude-mem-prior-request-id →
  *     x-membench-prior-request-id.
- *   - opts adds `response_format` (JSON accommodation, plan Phase 2) and an
+ *   - opts adds `response_format` (structured-output callers) and an
  *     external AbortSignal / backoff base-delay knob (offline tests).
  *
  * Prompt caching (opts.cacheControl, default OFF) — https://openrouter.ai/docs/features/prompt-caching
@@ -164,7 +164,7 @@ interface OpenRouterResponse {
 export interface QueryModelOptions {
   /** Defaults to OPENROUTER_API_KEY from the environment. */
   apiKey?: string;
-  /** JSON accommodation (plan Phase 2): forwarded verbatim in the body. */
+  /** Forwarded verbatim in the request body when a caller wants JSON output. */
   response_format?: { type: 'json_object' };
   /**
    * Request-shape overrides for non-observe callers (e.g. Phase 6's judge).

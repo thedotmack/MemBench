@@ -4,22 +4,24 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  computeContentHash,
+  listItems,
+  type ToolCallRecord,
+  type TranscriptRow,
+} from '../src/corpus-item.ts';
+import {
   CorpusBuildError,
   buildItem,
-  computeContentHash,
   extractToolCalls,
   filterTranscriptRows,
   freezeItem,
   listCandidates,
-  listItems,
   mineCommitSha,
   pinRepo,
   resanitizeItem,
   resolveBuildInputs,
   transcriptIndex,
   type GitRunner,
-  type ToolCallRecord,
-  type TranscriptRow,
 } from '../src/corpus.ts';
 import { SANITIZER_VERSION, sanitizeString, type Redaction } from '../src/sanitize.ts';
 
@@ -276,13 +278,13 @@ describe('buildItem', () => {
 
     const report = readFileSync(join(outDir, 'sanitization-report.md'), 'utf-8');
     expect(report).toContain('sk-key');
-    expect(report).toContain('home-path');
+    expect(report).toContain('username');
     expect(report).toContain('bearer-token');
     expect(report).toContain('jwt');
     expect(report).not.toContain(RAW_SK);
     const ruleNames = new Set(summary.redactions.map((entry) => entry.rule));
     expect(ruleNames.has('sk-key')).toBe(true);
-    expect(ruleNames.has('home-path')).toBe(true);
+    expect(ruleNames.has('username')).toBe(true);
   });
 
   test('building the same session twice reproduces identical content hashes', async () => {
@@ -600,7 +602,7 @@ describe('sanitizeString', () => {
     expect(output).not.toContain('alexnewman');
     expect(output).not.toContain('sk-abcdefgh');
     expect(output).not.toContain('MIIB');
-    expect(report.length).toBeGreaterThanOrEqual(9);
+    expect(report.length).toBeGreaterThanOrEqual(8);
   });
 
   test('context snippets never leak an adjacent secret of a later rule', () => {
