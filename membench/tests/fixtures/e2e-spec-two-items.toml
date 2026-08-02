@@ -1,0 +1,16 @@
+# Offline e2e run spec, two items — used for the cost-ceiling stop + --resume
+# test: the ceiling halts the run between items, leaving a partial (resumable)
+# results.jsonl. 2 items × (2+3) variants × 2 executors × k=1 = 20 rows total.
+corpus_items = ["mini-001", "mini-002"]
+observer_models = ["mock/observer-a", "mock/observer-b"]
+executors = ["claude-cli", "openrouter-agent"]
+k = 1
+observe_timeout_s = 30
+execute_timeout_s = 30
+judge_model = "mock/judge"
+max_cost_usd = 1.0
+max_steps = 5
+max_cost_per_run_usd = 0.5
+executor_model = "mock/executor"
+fork_concurrency = 2
+observe_concurrency = 4

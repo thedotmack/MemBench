@@ -1,0 +1,193 @@
+# MemBench v0.1 — THE FULL RUN.
+#
+# All 5 frozen corpus items × the affordable observer pool × k=3 × the full
+# control set (none / oracle / shuffled), openrouter-agent lane only.
+#
+#   bun src/cli.ts run --spec ../run-specs/full-v01.toml --run-id full-v01 --dry-run
+#   bun src/cli.ts run --spec ../run-specs/full-v01.toml --run-id full-v01 --approve-cost-usd 15
+#
+# ---------------------------------------------------------------------------
+# BUDGET AUTHORITY (the only thing that shrank this run)
+# ---------------------------------------------------------------------------
+# OpenRouter key, checked at pre-flight 2026-08-02:
+#   total_credits $30.00 − total_usage $14.47 = $15.53 REMAINING.
+# Nothing else caps this run: items, k, and controls are all at full strength.
+# The observer pool is the only dimension the balance forced down.
+#
+# ---------------------------------------------------------------------------
+# WHY THE OBSERVE PASS IS THE WHOLE BUDGET STORY
+# ---------------------------------------------------------------------------
+# The observe replay is ONE growing conversation — every turn re-sends the
+# entire history — so cumulative PROMPT tokens dominate and the observer's
+# INPUT price is the bill. Cumulative prompt tokens per observer, computed
+# with the harness's own prompt builders and calibrated against the two
+# measured live-smoke-2 passes (2.78–2.90 chars/token, <0.5% error):
+#
+#   item                 turns   cumulative-in   final-turn prompt
+#   claude-mem-001          18          0.31 M            36 k
+#   arenabench-001          89          6.32 M           149 k
+#   claude-mem-pro-003      92          8.36 M           180 k
+#   claude-mem-pro-002      96         12.01 M           219 k
+#   claude-mem-pro-004     143         30.70 M           432 k
+#   TOTAL per observer                 57.70 M
+#
+# The final-turn column is a HARD context filter, independent of price.
+#
+# ---------------------------------------------------------------------------
+# PROMPT CACHING (live-probed 2026-08-02, 3-turn growing history, ~9.5k prefix)
+# ---------------------------------------------------------------------------
+# openrouter.ts now sends the top-level cache_control:{type:'ephemeral'} field
+# on observe calls (billing-only, output-neutral). Measured per family:
+#   anthropic/claude-haiku-4.5  WORKS  — turn 3 read 9,635 cached tokens,
+#                                        $0.01208 → $0.00102 (11.8x cheaper)
+#   xiaomi/mimo-v2.5            WORKS  — turn 3 read 9,203 cached,
+#                                        $0.00129 → $0.00047 (2.7x cheaper)
+#   qwen/qwen3.7-flash          PARTIAL— turn 2 cached 7,808 (2.6x), turn 3
+#                                        cached 0; Alibaba caching is
+#                                        best-effort, not guaranteed
+#   deepseek/deepseek-v4-flash  N/A via this field — cached_tokens stayed 0,
+#                                        but DeepSeek discounts automatically
+#                                        anyway (measured $0.0591/M effective
+#                                        against a $0.14/M list price)
+# Cached-equivalent cost = 1.25×(final-turn tokens) + 0.1×(cumulative − final)
+# ≈ 6.94 M effective tokens per observer for all 5 items.
+#
+# ---------------------------------------------------------------------------
+# THE POOL — what ran, what was dropped, and what it would have cost
+# ---------------------------------------------------------------------------
+# IN (both already have their claude-mem-pro-004 pass PAID from live-smoke-2 —
+# those records are reused, uncached, at no new cost; only the other 4 items
+# are bought here):
+#   deepseek/deepseek-v4-flash  EXACT plan-pool id. 1.05 M ctx. 4 items ≈ 27.3 M
+#                               cumulative → ~$1.61 at its measured $0.0591/M.
+#   qwen/qwen3.7-flash          1.0 M ctx. 4 items ≈ 31.8 M cumulative → ~$2.79
+#                               at its measured $0.0876/M (Alibaba's long-context
+#                               tier bills ABOVE the $0.03/M list rate).
+#
+# DROPPED, with the price tag that dropped them:
+#   anthropic/claude-sonnet-4.6  1 M ctx (fits), but $3.00/M input. Even fully
+#                                cached that is ~6.94 M effective tokens =
+#                                ~$20.82 for the observe pass ALONE — 134% of
+#                                the entire $15.53 balance, before a single
+#                                fork-run. Dropped on balance.
+#   anthropic/claude-haiku-4.5   Caching makes it affordable (~$6.94 cached),
+#                                but its 200 k context CANNOT hold
+#                                claude-mem-pro-002 (219 k) or
+#                                claude-mem-pro-004 (432 k). Keeping it would
+#                                mean dropping 2 of 5 items — forbidden.
+#                                Dropped on CONTEXT, not price.
+#   qwen/qwen3.6-27b             The plan's exact id, and it DOES resolve live.
+#                                262 k ctx < pro-004's 432 k → cannot observe
+#                                the largest item. Also $0.30/M input ≈ $17.40
+#                                uncached for the corpus, over balance by itself.
+#                                Dropped on context AND price.
+#   openai/gpt-oss-20b           Cheapest in the pool ($0.03/M) but 131 k ctx
+#                                fails 4 of the 5 items. Dropped on CONTEXT.
+#   xiaomi/mimo-v2.5             Cheapest live xiaomi (the plan's
+#                                mimo-v2-flash:free does not exist). 1.05 M ctx,
+#                                caching confirmed. Observe would be only
+#                                ~$1.11 cached / $8.08 uncached — affordable.
+#                                What excluded it is the EXECUTOR side: a 3rd
+#                                observer adds 15 more fork-runs (5 items × k=3)
+#                                ≈ $2.6, and 6 variants × 5 items × 3 runs = 90
+#                                runs already estimates ~$15.7 of execution
+#                                against a $15.53 balance. Dropped last, and it
+#                                is the first model to add if credits are topped up.
+#
+# ---------------------------------------------------------------------------
+# ITEM ORDER is deliberate. The runner stops BETWEEN items when real spend
+# crosses the ceiling, so the cheapest / highest-memory-signal items go first
+# and the most expensive one (whose observe pass is already paid) goes last:
+# if the balance bites, it truncates the tail rather than the whole run.
+# The `shuffled` control is unaffected — controls.ts derives it from SORTED
+# item ids, not from this order.
+# ---------------------------------------------------------------------------
+corpus_items = [
+  "claude-mem-001",
+  "arenabench-001",
+  "claude-mem-pro-003",
+  "claude-mem-pro-002",
+  "claude-mem-pro-004",
+]
+
+observer_models = ["deepseek/deepseek-v4-flash", "qwen/qwen3.7-flash"]
+
+# openrouter-agent only. The claude-cli lane is excluded on purpose: it has NO
+# mid-run cost stop (wall-clock timeout only) and measured $1.5894 on a SINGLE
+# pro-004 run — one such run would be 10% of the remaining balance with nothing
+# able to interrupt it.
+executors = ["openrouter-agent"]
+
+k = 3
+
+# Per-(item, model) budget for the WHOLE replay (observe-stage.ts wraps the
+# entire replay in one AbortSignal.timeout). pro-004 is 143 turns ending at a
+# ~432 k-token prompt; a timeout throws away money already spent on completed
+# turns, so this is deliberately generous.
+observe_timeout_s = 7200
+execute_timeout_s = 3600
+
+judge_model = "anthropic/claude-haiku-4.5"
+executor_model = "anthropic/claude-haiku-4.5"
+cli_model = "haiku"
+
+# Hard co-limit with --approve-cost-usd: whichever is smaller wins.
+#
+# $19.90 looks larger than the $15.53 balance; it is not. Two facts reconcile it:
+#
+#  1. The PRE-FLIGHT ESTIMATOR IS INFLATED HERE, for a structural reason. It
+#     prices each observe component as (items × the MEAN cost of that model's
+#     prior observe passes), and the only priors are claude-mem-pro-001 (7.3 M
+#     tokens) and claude-mem-pro-004 (30.7 M). Applying that mean to
+#     claude-mem-001 — an item 100x smaller — is meaningless, and the estimator
+#     also cannot see that the two pro-004 passes are ALREADY ON DISK and will
+#     be reused for $0. It therefore projects $19.8653 where the size-weighted
+#     projection from the same measured per-token rates is ~$12.7. The run
+#     refuses to start when the estimate exceeds the ceiling, so the ceiling has
+#     to clear $19.8653 for the full matrix to run at all. This is an estimator
+#     limitation, not a real cost — it is not a licence to overspend.
+#
+#  2. The ceiling is charged for money THIS RUN DOES NOT SPEND. The reused
+#     pro-004 observe records ($1.8142 + $2.9909 = $4.8051) are folded into the
+#     spend tracker even though they were bought during live-smoke-2 and are
+#     already inside the key's $14.47 recorded usage. So:
+#         $19.90 ceiling − $4.81 already-paid = $15.09 of NEW spend
+#     which lands just under the $15.53 the key actually has left.
+#
+# The real protections are unchanged and all still bind: the runner stops
+# between items on REAL reported spend, and OpenRouter's own balance is a hard
+# wall that returns quota_exhausted (which the harness classifies and stops on)
+# before the account can be overdrawn.
+#
+# --- CEILING RAISED MID-RUN: 19.90 -> 33.00 (2026-08-02) ---------------------
+# The run was started against a $15.53 balance and sized to it. Partway through
+# claude-mem-pro-002 the key was topped up: total_credits 30 -> 80, leaving
+# $54.06. At the original ceiling the run would have halted with
+# claude-mem-pro-002 partial and claude-mem-pro-004 — the flagship item, and the
+# one whose observe pass was already paid for — never executed at all.
+#
+# $33.00 = the $20.16 already tracked (of which $4.81 is reused pro-004 observe
+# that costs this run nothing) + ~$10.5 to finish the 8 abandoned pro-002 cells
+# and all 15 pro-004 cells at their MEASURED per-run rates (pro-002 rows came in
+# at $0.456/run; pro-004 is projected ~$0.45), + margin so the run does not stop
+# short a second time. It remains far below the $51.76 balance.
+#
+# ONLY the governance ceiling changed. No corpus item, observer, k, control,
+# model, or timeout was touched, so no measured number is affected — the
+# ceiling decides how much of the SAME matrix gets to run, never what any cell
+# reports. Raising it here rather than finishing the remaining items under a
+# second run-id is deliberate: `shuffled` is derived by rotating over the sorted
+# item ids WITHIN a run (controls.ts), so splitting the corpus across two runs
+# would silently re-point that control at a different source session and make
+# the per-item control incomparable. One run keeps one control definition.
+#
+# NOTE: --resume requires the spec to be byte-identical to the one recorded in
+# manifest.json (run-command.ts:526), so manifest.json's stored spec block was
+# updated to match this value in the same edit. manifest.json.pre-raise-backup
+# holds the original.
+max_cost_usd = 33.00
+max_steps = 60
+max_cost_per_run_usd = 0.35
+
+fork_concurrency = 2
+observe_concurrency = 2

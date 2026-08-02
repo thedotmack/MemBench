@@ -1,0 +1,11 @@
+# Invalid: "codex" is not a MemBench executor lane — loader must reject.
+corpus_items = ["claude-mem-pro-004"]
+observer_models = ["google/gemini-2.5-flash"]
+executors = ["claude-cli", "codex"]
+k = 1
+observe_timeout_s = 300
+execute_timeout_s = 1800
+judge_model = "anthropic/claude-sonnet-4.5"
+max_cost_usd = 25.0
+max_steps = 50
+max_cost_per_run_usd = 2.5

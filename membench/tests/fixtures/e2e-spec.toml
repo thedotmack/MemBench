@@ -1,0 +1,16 @@
+# Offline e2e run spec (tests/e2e-offline.test.ts).
+# 1 item × 2 mock observer models (+ none/oracle/shuffled) × 2 executors × k=2
+# = (2+3) × 2 × 2 = 20 result rows.
+corpus_items = ["mini-001"]
+observer_models = ["mock/observer-a", "mock/observer-b"]
+executors = ["claude-cli", "openrouter-agent"]
+k = 2
+observe_timeout_s = 30
+execute_timeout_s = 30
+judge_model = "mock/judge"
+max_cost_usd = 1.0
+max_steps = 5
+max_cost_per_run_usd = 0.5
+executor_model = "mock/executor"
+fork_concurrency = 2
+observe_concurrency = 4

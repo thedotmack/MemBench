@@ -1,0 +1,16 @@
+{
+  "name": "membench",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@openrouter/agent": "0.8.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "7.0.2"
+  }
+}

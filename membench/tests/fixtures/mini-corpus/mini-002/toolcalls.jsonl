@@ -1,0 +1,2 @@
+{"tool_name":"Read","tool_input":{"file_path":"scripts/release.sh"},"tool_output":{"type":"text","file":{"filePath":"scripts/release.sh","content":"#!/usr/bin/env bash\nnpm version patch\n"}},"created_at_epoch":1753600000000,"cwd":"/Users/user/Scripts/mini2"}
+{"tool_name":"Bash","tool_input":{"command":"git status --short"},"tool_output":{"stdout":"","stderr":"","exitCode":0},"created_at_epoch":1753600001000,"cwd":"/Users/user/Scripts/mini2"}

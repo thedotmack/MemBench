@@ -1,0 +1,12 @@
+{
+  "content_session_id": "834d894b-1972-480e-b255-1f569ad27e8e",
+  "project_slug": "arenabench",
+  "session_n_plus_1_id": "519ad8aa-13eb-4b60-a6f1-a38f3bb063df",
+  "dates": {
+    "session_n_started": "2026-07-03T19:20:06.941Z",
+    "session_n_ended": "2026-07-03T22:29:48.177Z",
+    "session_n_plus_1_started": "2026-07-03T22:30:19.628Z"
+  },
+  "sanitizer_version": 3,
+  "content_hash": "f279aab69c1e27524b21000b80bd5a13404122684f46c6618491b398b547b738"
+}
