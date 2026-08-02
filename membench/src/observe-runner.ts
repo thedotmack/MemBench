@@ -253,6 +253,10 @@ async function runConversation(
     ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
     ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
     ...(jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
+    // Billing-only prompt caching for the growing-history replay (openrouter.ts
+    // header). Output-neutral: the message sequence and sampling params are
+    // unchanged, so this alters what the run COSTS, never what it measures.
+    cacheControl: true,
   };
 
   // Init prompt is turn 1, role user (OpenAICompatibleProvider.ts:100-105).

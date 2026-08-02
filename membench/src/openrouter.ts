@@ -23,6 +23,26 @@
  *   - opts adds `response_format` (JSON accommodation, plan Phase 2) and an
  *     external AbortSignal / retry-timing knobs (offline tests).
  *
+ * Prompt caching (opts.cacheControl, default OFF) — https://openrouter.ai/docs/features/prompt-caching
+ * The observe replay is ONE growing conversation: every turn re-sends the whole
+ * history, so cumulative prompt tokens dominate the bill (measured: 30.7M for a
+ * 143-turn item). Setting the top-level `cache_control: {type:'ephemeral'}`
+ * field lets OpenRouter place the cache breakpoint on the last cacheable block,
+ * so each turn re-reads the prior history at 0.1x input price and writes only
+ * the new tail at 1.25x (5-minute TTL; replay turns run seconds apart, well
+ * inside it). Provider behavior differs: DeepSeek and OpenAI cache
+ * automatically, Anthropic caches only when asked, Qwen/Alibaba want explicit
+ * breakpoints — so this is opt-in and its benefit is VERIFIED per provider with
+ * a live probe, never assumed.
+ *
+ * This is a BILLING-ONLY optimization and is OUTPUT-NEUTRAL: it adds a
+ * transport-level field and changes neither the message sequence, the roles,
+ * the prompt text, nor any sampling parameter, so the production observe
+ * message shape and semantics being benchmarked are untouched. Guard-1
+ * accounting stays honest for free — the provider's reported `usage.cost`
+ * already reflects the discount, so MemBench keeps recording real reported
+ * spend and never estimates a cached rate.
+ *
  * Cost is REAL reported usage only: usage.cost (+ cost_details.
  * upstream_inference_cost with BYOK), else `undefined`. NEVER estimated
  * (plan §0.2 guard 1). Tokens come from usage.prompt_tokens /
@@ -156,6 +176,12 @@ export interface QueryModelOptions {
   maxTokens?: number;
   /** External abort — forwarded to the retry loop and each fetch attempt. */
   abortSignal?: AbortSignal;
+  /**
+   * Opt-in prompt caching (BILLING ONLY — see the "Prompt caching" note in
+   * this file's header). When true, the request body carries the top-level
+   * `cache_control: {type:'ephemeral'}` field; absent by default.
+   */
+  cacheControl?: boolean;
   /** Retry knobs (offline tests); defaults come from retry.ts (2 / 30s / 100ms). */
   maxRetries?: number;
   perAttemptTimeoutMs?: number;
@@ -212,6 +238,8 @@ export async function queryModel(
           // Ask openrouter.ai for usage accounting (token counts + cost).
           usage: { include: true },
           ...(opts.response_format ? { response_format: opts.response_format } : {}),
+          // Billing-only; output-neutral. See the header's "Prompt caching" note.
+          ...(opts.cacheControl ? { cache_control: { type: 'ephemeral' } } : {}),
         }),
         signal: attemptSignal,
       });

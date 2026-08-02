@@ -82,6 +82,40 @@ describe('queryModel — request shape', () => {
     expect(body.response_format).toEqual({ type: 'json_object' });
   });
 
+  test('cacheControl:true adds the top-level cache_control field (billing-only, output-neutral)', async () => {
+    const fetchMock = mock(() => Promise.resolve(okResponse()));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await queryModel(MODEL, MESSAGES, { ...OPTS, cacheControl: true });
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.cache_control).toEqual({ type: 'ephemeral' });
+    // Output-neutral: caching must not perturb what the run measures.
+    expect(body.messages).toEqual(MESSAGES);
+    expect(body.temperature).toBe(0.3);
+    expect(body.usage).toEqual({ include: true });
+  });
+
+  test('cache_control is ABSENT by default (opt-in only)', async () => {
+    const fetchMock = mock(() => Promise.resolve(okResponse()));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await queryModel(MODEL, MESSAGES, OPTS);
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect('cache_control' in body).toBe(false);
+  });
+
+  test('cacheControl:false stays absent (no falsy field emitted)', async () => {
+    const fetchMock = mock(() => Promise.resolve(okResponse()));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await queryModel(MODEL, MESSAGES, { ...OPTS, cacheControl: false });
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect('cache_control' in body).toBe(false);
+  });
+
   test('temperature/maxTokens are overridable (judge reuse) while defaults stay the observe shape', async () => {
     const fetchMock = mock(() => Promise.resolve(okResponse()));
     global.fetch = fetchMock as unknown as typeof fetch;
