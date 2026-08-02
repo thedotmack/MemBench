@@ -1157,7 +1157,11 @@ export function renderScoreboard(summary: RunSummary): string {
   );
   if (spec) {
     lines.push(`- k (runs per cell): ${spec.k} · executors: ${spec.executors.map((lane) => `\`${lane}\``).join(', ')}`);
-    lines.push(`- judge model: \`${cell(spec.judge_model)}\`${spec.executor_model ? ` · openrouter-agent executor model: \`${cell(spec.executor_model)}\`` : ''}`);
+    lines.push(
+      `- judge model: \`${cell(spec.judge_model)}\`` +
+        `${spec.executor_model ? ` · openrouter-agent executor model: \`${cell(spec.executor_model)}\`` : ''}` +
+        `${spec.cli_model ? ` · claude-cli lane model: \`${cell(spec.cli_model)}\`` : ''}`,
+    );
   }
   lines.push(
     `- result rows: ${summary.totals.rows} (successes ${summary.totals.successes}, errored ${summary.totals.errored}` +
@@ -1178,6 +1182,11 @@ export function renderScoreboard(summary: RunSummary): string {
   lines.push('');
   lines.push('- **success rate** = successes / runs in the cell (errored runs count as failures). Compare against the `none` floor.');
   lines.push('- **tokens-to-done** = mean ± sample stddev (n−1) of `tokens_total`, over SUCCESSFUL runs with reported usage only.');
+  lines.push(
+    '  Token semantics are **lane-specific and NOT comparable across lanes**: `claude-cli` sums per-turn transcript usage ' +
+      'including cache-creation and cache-read prompt tokens, while `openrouter-agent` reports OpenRouter’s prompt/completion ' +
+      'counts. This is one more reason a cell never mixes lanes — read the cross-executor deltas as context, never as a ranking.',
+  );
   lines.push('- **% of oracle savings** = (floor_mean − model_mean) / (floor_mean − oracle_mean), in percent. `n/a` where the formula is undefined.');
   lines.push('  A negative % means the model did WORSE than the no-memory floor; above 100% means it beat the hand-written oracle. Both are reported as measured, never clamped.');
   lines.push('- **exec cost** = Σ reported `cost_usd` for the cell (a lower bound whenever rows reported no cost). **obs cost** = the observer model\'s write-side spend for the WHOLE run, shared across lanes — do not add the lanes together.');

@@ -6,10 +6,11 @@
  * --output-format json result. No real CLI, no network.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { readJsonl } from '../src/jsonl.ts';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildMcpConfig, countMemSearchCalls, createClaudeCliExecutor, findSessionTranscript, parseCliJsonOutput } from '../src/executors/claude-cli.ts';
+import { buildMcpConfig, countMemSearchCalls, createClaudeCliExecutor, findSessionTranscript, parseCliJsonOutput, resolveClaudeCredentials, seedClaudeCredentials, sumTranscriptUsage } from '../src/executors/claude-cli.ts';
 import type { Budget, ForkContext } from '../src/types.ts';
 
 const CLAUDE_MEM_ROOT = '/stub/claude-mem-root';
@@ -55,24 +56,39 @@ function makeFork(name: string, workerPort = 39123): { fork: ForkContext; forkDi
 }
 
 /** Session transcript fixture: 4 mem-search tool_use blocks + decoys. */
+const USAGE_A = { input_tokens: 10, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 5 };
+const USAGE_B = { input_tokens: 20, cache_read_input_tokens: 2000, output_tokens: 7 };
+const USAGE_D = { input_tokens: 30, cache_creation_input_tokens: 300, output_tokens: 11 };
+const USAGE_E = { input_tokens: 40, cache_read_input_tokens: 4000, output_tokens: 13 };
+// Counted ONCE per message.id: a=1110, b=2020, c=0, d=330, e=4040.
+const FIXTURE_TRANSCRIPT_TOKENS_IN = 1110 + 2020 + 330 + 4040; // 7500
+const FIXTURE_TRANSCRIPT_TOKENS_OUT = 5 + 7 + 9 + 11 + 13; // 45
+// What per-ROW summing would wrongly produce (msg-a x3, msg-b x2).
+const FIXTURE_NAIVE_TOKENS_IN = 1110 * 3 + 2020 * 2 + 330 + 4040; // 11740
+
 function writeFixtureTranscript(dir: string): string {
+  // Mirrors a REAL Claude Code transcript: one row PER CONTENT BLOCK, with
+  // every row of a message repeating the SAME message.id and the SAME usage.
+  // Two consequences the executor must get right, and this fixture pins both:
+  //   - usage counts ONCE per message.id (naive per-row summing would give
+  //     11,740 / 62 here instead of 7,500 / 45)
+  //   - mem-search counting must NOT dedupe: each group's tool_use sits in its
+  //     LAST row, so deduping would miss msg-a and msg-b entirely (4 -> 2).
   const rows = [
     { type: 'user', message: { role: 'user', content: 'hello' } },
-    {
-      type: 'assistant',
-      message: {
-        content: [
-          { type: 'tool_use', name: 'mcp__mcp-search__search', input: { query: 'x' } },
-          { type: 'text', text: 'searching' },
-        ],
-      },
-    },
-    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mcp-search__timeline', input: { anchor: 1 } }] } },
-    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mcp-search__get_observations', input: { ids: [1] } }] } },
-    // Decoys: a non-mem-search tool and a lookalike name must not count.
+    // msg-a: three rows, tool_use last.
+    { type: 'assistant', requestId: 'req-a', message: { id: 'msg-a', content: [{ type: 'thinking', thinking: 'hmm' }], usage: USAGE_A } },
+    { type: 'assistant', requestId: 'req-a', message: { id: 'msg-a', content: [{ type: 'text', text: 'searching' }], usage: USAGE_A } },
+    { type: 'assistant', requestId: 'req-a', message: { id: 'msg-a', content: [{ type: 'tool_use', name: 'mcp__mcp-search__search', input: { query: 'x' } }], usage: USAGE_A } },
+    // msg-b: two rows, tool_use last.
+    { type: 'assistant', requestId: 'req-b', message: { id: 'msg-b', content: [{ type: 'text', text: 'more' }], usage: USAGE_B } },
+    { type: 'assistant', requestId: 'req-b', message: { id: 'msg-b', content: [{ type: 'tool_use', name: 'mcp__mcp-search__timeline', input: { anchor: 1 } }], usage: USAGE_B } },
+    // msg-c: single row, output-only usage (no prompt components).
+    { type: 'assistant', message: { id: 'msg-c', content: [{ type: 'tool_use', name: 'mcp__mcp-search__get_observations', input: { ids: [1] } }], usage: { output_tokens: 9 } } },
+    // Decoys: a non-mem-search tool (no usage, no id) and a lookalike name.
     { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { path: 'a' } }] } },
-    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mcp-search__rebuild_corpus', input: {} }] } },
-    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__mcp-search__search', input: { query: 'y' } }] } },
+    { type: 'assistant', message: { id: 'msg-d', content: [{ type: 'tool_use', name: 'mcp__mcp-search__rebuild_corpus', input: {} }], usage: USAGE_D } },
+    { type: 'assistant', message: { id: 'msg-e', content: [{ type: 'tool_use', name: 'mcp__mcp-search__search', input: { query: 'y' } }], usage: USAGE_E } },
   ];
   const path = join(dir, 'fixture-session.jsonl');
   writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
@@ -127,6 +143,9 @@ function writeStubClaude(dir: string, options: StubOptions): string {
     '#!/bin/bash',
     `printf '%s\\0' "$@" > "${outDir}/argv.txt"`,
     `env > "${outDir}/env.txt"`,
+    // Snapshot the seeded credential AS THE CLI SEES IT: the executor deletes
+    // it during teardown, so presence can only be asserted from in here.
+    `if [ -f "$HOME/.claude/.credentials.json" ]; then cp "$HOME/.claude/.credentials.json" "${outDir}/seen-creds.json"; fi`,
     'SESSION_ID=""',
     'prev=""',
     'for a in "$@"; do',
@@ -185,8 +204,10 @@ describe('claude-cli executor (stubbed binary)', () => {
     // Complete record, no error.
     expect(record.error).toBeUndefined();
     expect(record.output).toBe('Task complete: stub run');
-    expect(record.tokens_in).toBe(1200);
-    expect(record.tokens_out).toBe(340);
+    // Tokens come from the TRANSCRIPT (per-turn, incl. cache), NOT the result
+    // block — CANNED_RESULT claims 1200/340, which is only its last turn.
+    expect(record.tokens_in).toBe(FIXTURE_TRANSCRIPT_TOKENS_IN);
+    expect(record.tokens_out).toBe(FIXTURE_TRANSCRIPT_TOKENS_OUT);
     expect(record.cost_usd).toBe(0.0421);
 
     // Argv: verified flags present, guard-5 flag absent, prompt positional last.
@@ -409,3 +430,262 @@ describe('claude-cli helpers', () => {
     expect(config.mcpServers['mcp-search'].env.CLAUDE_MEM_RUNTIME).toBe('worker');
   });
 });
+
+describe('claude-cli fork-HOME auth seeding', () => {
+  const CREDS = JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-token', refreshToken: 'fixture-refresh' } });
+
+  test('seedClaudeCredentials writes exactly one 0600 file and nothing else', () => {
+    const home = tempDir('seed-home');
+    const path = seedClaudeCredentials(home, CREDS);
+    expect(path).toBe(join(home, '.claude', '.credentials.json'));
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(JSON.parse(CREDS));
+    // guard 4: only .credentials.json lands in the isolated .claude dir —
+    // no history.jsonl / projects/ / settings copied from the real home.
+    expect(readdirSync(join(home, '.claude'))).toEqual(['.credentials.json']);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  test('executor seeds the fork HOME before spawning the CLI', async () => {
+    const { fork, forkDir } = makeFork('seed-exec');
+    const bin = writeStubClaude(forkDir, { outDir: forkDir });
+    const executor = createClaudeCliExecutor({
+      claudeBin: bin,
+      claudeMemRoot: CLAUDE_MEM_ROOT,
+      credentialsJson: CREDS,
+    });
+    await executor.execute(fork, 'do the thing', BUDGET);
+    // Seeded before spawn (captured by the stub)...
+    const seen = join(forkDir, 'seen-creds.json');
+    expect(existsSync(seen)).toBe(true);
+    expect(JSON.parse(readFileSync(seen, 'utf8')).claudeAiOauth.accessToken).toBe('fixture-token');
+    // ...and scrubbed afterwards.
+    expect(existsSync(join(fork.homeDir, '.claude', '.credentials.json'))).toBe(false);
+  });
+
+  test('no credentialsJson leaves the fork HOME untouched (offline/stub runs)', async () => {
+    const { fork, forkDir } = makeFork('seed-none');
+    const bin = writeStubClaude(forkDir, { outDir: forkDir });
+    const executor = createClaudeCliExecutor({ claudeBin: bin, claudeMemRoot: CLAUDE_MEM_ROOT });
+    await executor.execute(fork, 'do the thing', BUDGET);
+    expect(existsSync(join(forkDir, 'seen-creds.json'))).toBe(false);
+    expect(existsSync(join(fork.homeDir, '.claude', '.credentials.json'))).toBe(false);
+  });
+
+  test('resolveClaudeCredentials reads the override file and keeps ONLY claudeAiOauth', () => {
+    const dir = tempDir('creds-override');
+    const file = join(dir, 'creds.json');
+    // mcpOAuth deliberately present: fork runs must not inherit MCP tokens.
+    writeFileSync(file, JSON.stringify({ claudeAiOauth: { accessToken: 't' }, mcpOAuth: { secret: 'nope' } }));
+    process.env.MEMBENCH_CLAUDE_CREDENTIALS_FILE = file;
+    try {
+      const resolved = resolveClaudeCredentials();
+      expect(resolved).not.toBeNull();
+      const parsed = JSON.parse(resolved!);
+      expect(parsed).toEqual({ claudeAiOauth: { accessToken: 't' } });
+      expect(parsed.mcpOAuth).toBeUndefined();
+    } finally {
+      delete process.env.MEMBENCH_CLAUDE_CREDENTIALS_FILE;
+    }
+  });
+
+  test('resolveClaudeCredentials returns null for a missing or shapeless override', () => {
+    process.env.MEMBENCH_CLAUDE_CREDENTIALS_FILE = join(tempDir('creds-missing'), 'absent.json');
+    try {
+      expect(resolveClaudeCredentials()).toBeNull();
+    } finally {
+      delete process.env.MEMBENCH_CLAUDE_CREDENTIALS_FILE;
+    }
+    const dir = tempDir('creds-bad');
+    const file = join(dir, 'creds.json');
+    writeFileSync(file, JSON.stringify({ somethingElse: true }));
+    process.env.MEMBENCH_CLAUDE_CREDENTIALS_FILE = file;
+    try {
+      expect(resolveClaudeCredentials()).toBeNull();
+    } finally {
+      delete process.env.MEMBENCH_CLAUDE_CREDENTIALS_FILE;
+    }
+  });
+});
+
+describe('claude-cli token accounting (transcript is authoritative)', () => {
+  test('counts usage ONCE per message.id when Claude Code splits a turn across content-block rows', () => {
+    // Three rows, one message, identical usage repeated on each — the real
+    // transcript shape (verified on live-smoke-1: 25 usage rows / 8 messages).
+    const usage = { input_tokens: 10, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 5 };
+    const split = [
+      { requestId: 'r1', message: { id: 'm1', content: [{ type: 'thinking' }], usage } },
+      { requestId: 'r1', message: { id: 'm1', content: [{ type: 'text' }], usage } },
+      { requestId: 'r1', message: { id: 'm1', content: [{ type: 'tool_use', name: 'mcp__mcp-search__search' }], usage } },
+    ];
+    expect(sumTranscriptUsage(split)).toEqual({ tokensIn: 1110, tokensOut: 5 });
+    // ...and emphatically NOT the 3x per-row total.
+    expect(sumTranscriptUsage(split)).not.toEqual({ tokensIn: 3330, tokensOut: 15 });
+    // mem-search counting deliberately does NOT dedupe: the tool_use lives in
+    // the LAST row of the group, so a dedupe here would report 0.
+    expect(countMemSearchCalls(split)).toBe(1);
+  });
+
+  test('rows with no message.id are counted individually (nothing to group by)', () => {
+    const u = { input_tokens: 5, output_tokens: 1 };
+    expect(sumTranscriptUsage([{ message: { usage: u } }, { message: { usage: u } }])).toEqual({
+      tokensIn: 10,
+      tokensOut: 2,
+    });
+  });
+
+  test('the whole fixture transcript pins deduped tokens AND undeduped mem-search', async () => {
+    const dir = tempDir('fixture-dedupe');
+    const rows = await readJsonl(writeFixtureTranscript(dir));
+    expect(sumTranscriptUsage(rows)).toEqual({
+      tokensIn: FIXTURE_TRANSCRIPT_TOKENS_IN,
+      tokensOut: FIXTURE_TRANSCRIPT_TOKENS_OUT,
+    });
+    expect(sumTranscriptUsage(rows).tokensIn).not.toBe(FIXTURE_NAIVE_TOKENS_IN);
+    expect(countMemSearchCalls(rows)).toBe(4);
+  });
+
+  test('sumTranscriptUsage adds input + cache_creation + cache_read per turn', () => {
+    const rows = [
+      { message: { usage: { input_tokens: 5, cache_creation_input_tokens: 50, cache_read_input_tokens: 500, output_tokens: 3 } } },
+      { message: { usage: { input_tokens: 7, output_tokens: 4 } } },
+    ];
+    expect(sumTranscriptUsage(rows)).toEqual({ tokensIn: 5 + 50 + 500 + 7, tokensOut: 7 });
+  });
+
+  test('sumTranscriptUsage omits a component no turn reported, never zero-fills', () => {
+    // output only: tokensIn must be ABSENT (guard 1), not 0.
+    expect(sumTranscriptUsage([{ message: { usage: { output_tokens: 9 } } }])).toEqual({ tokensOut: 9 });
+    // no usage anywhere at all
+    expect(sumTranscriptUsage([{ message: { content: [] } }, 'junk', null])).toEqual({});
+    // non-numeric values are ignored rather than coerced
+    expect(sumTranscriptUsage([{ message: { usage: { input_tokens: 'lots', output_tokens: 2 } } }])).toEqual({ tokensOut: 2 });
+  });
+
+  test('a retained transcript with NO usage clears the result-block numbers', async () => {
+    const { fork, forkDir } = makeFork('tok-noturn');
+    const stubDir = tempDir('tok-noturn-stub');
+    const claudeBin = writeStubClaude(stubDir, {
+      outDir: stubDir,
+      // minimal transcript carries no usage at all
+      fixtureTranscript: writeMinimalTranscript(stubDir),
+      cannedJson: CANNED_RESULT, // claims 1200 / 340
+    });
+    const executor = createClaudeCliExecutor({ claudeBin, claudeMemRoot: CLAUDE_MEM_ROOT });
+    const record = await executor.execute(fork, PROMPT, BUDGET);
+    expect(record.error).toBeUndefined();
+    expect(record.tokens_in).toBeUndefined();
+    expect(record.tokens_out).toBeUndefined();
+    // cost still comes from the result block — only TOKENS moved to the transcript.
+    expect(record.cost_usd).toBe(0.0421);
+    expect(forkDir).toBeTruthy();
+  });
+
+  test('falls back to result-block tokens when no transcript was retained', async () => {
+    const { fork } = makeFork('tok-notranscript');
+    const stubDir = tempDir('tok-notranscript-stub');
+    // No fixtureTranscript => the stub writes none, so the fallback applies
+    // (and the existing "transcript not found" error fires alongside it).
+    const claudeBin = writeStubClaude(stubDir, { outDir: stubDir, cannedJson: CANNED_RESULT });
+    const executor = createClaudeCliExecutor({ claudeBin, claudeMemRoot: CLAUDE_MEM_ROOT });
+    const record = await executor.execute(fork, PROMPT, BUDGET);
+    expect(record.error).toBe('session transcript not found under fork HOME');
+    expect(record.tokens_in).toBe(1200);
+    expect(record.tokens_out).toBe(340);
+  });
+});
+
+describe('claude-cli credential lifecycle', () => {
+  const CREDS2 = JSON.stringify({ claudeAiOauth: { accessToken: 'live-ish-token' } });
+
+  test('seeded credentials are deleted after the run even though the fork dir is kept', async () => {
+    const { fork, forkDir } = makeFork('creds-teardown');
+    const stubDir = tempDir('creds-teardown-stub');
+    const claudeBin = writeStubClaude(stubDir, {
+      outDir: stubDir,
+      fixtureTranscript: writeFixtureTranscript(stubDir),
+      cannedJson: CANNED_RESULT,
+    });
+    const executor = createClaudeCliExecutor({
+      claudeBin,
+      claudeMemRoot: CLAUDE_MEM_ROOT,
+      credentialsJson: CREDS2,
+    });
+    const record = await executor.execute(fork, PROMPT, BUDGET);
+    expect(record.error).toBeUndefined();
+    // The audit trail survives...
+    expect(existsSync(join(forkDir, 'session-transcript.jsonl'))).toBe(true);
+    // ...but the live credential does not.
+    expect(existsSync(join(fork.homeDir, '.claude', '.credentials.json'))).toBe(false);
+  });
+
+  test('credentials are deleted on the failure path too', async () => {
+    const { fork } = makeFork('creds-teardown-fail');
+    const stubDir = tempDir('creds-teardown-fail-stub');
+    // exit 1 and no transcript => error row, teardown must still scrub creds.
+    const claudeBin = writeStubClaude(stubDir, { outDir: stubDir, exitCode: 1, mutateRepo: false });
+    const executor = createClaudeCliExecutor({
+      claudeBin,
+      claudeMemRoot: CLAUDE_MEM_ROOT,
+      credentialsJson: CREDS2,
+    });
+    const record = await executor.execute(fork, PROMPT, BUDGET);
+    expect(record.error).toBeDefined();
+    expect(existsSync(join(fork.homeDir, '.claude', '.credentials.json'))).toBe(false);
+  });
+});
+
+describe('captureGitDiff vs the pinned base commit', () => {
+  test('captures work the agent COMMITTED (bare `git diff` would be empty)', async () => {
+    const { fork, forkDir } = makeFork('diff-committed');
+    const baseSha = git(['rev-parse', 'HEAD'], fork.repoDir);
+    const stubDir = tempDir('diff-committed-stub');
+    // Stub agent: edit a tracked file, add a new file, then COMMIT both.
+    const bin = join(stubDir, 'claude');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/bash',
+        'echo "agent change" >> README.md',
+        'echo "brand new" > NEWFILE.md',
+        'git add -A',
+        'git -c user.email=a@b.invalid -c user.name=Stub commit --quiet -m "agent work"',
+        `cat "${stubDir}/canned.json"`,
+      ].join('\n') + '\n',
+    );
+    chmodSync(bin, 0o755);
+    writeFileSync(join(stubDir, 'canned.json'), CANNED_RESULT);
+
+    const executor = createClaudeCliExecutor({ claudeBin: bin, claudeMemRoot: CLAUDE_MEM_ROOT });
+    const record = await executor.execute({ ...fork, baseSha }, PROMPT, BUDGET);
+
+    // Sanity: the agent really did commit, so the worktree is clean.
+    expect(git(['status', '--porcelain'], fork.repoDir)).toBe('');
+    const diff = readFileSync(join(forkDir, 'executor.diff'), 'utf-8');
+    expect(diff.length).toBeGreaterThan(0);
+    expect(diff).toContain('agent change');
+    expect(diff).toContain('NEWFILE.md');
+    expect(record.diff_path).toBe(join(forkDir, 'executor.diff'));
+  });
+
+  test('still captures uncommitted and untracked work', async () => {
+    const { fork, forkDir } = makeFork('diff-uncommitted');
+    const baseSha = git(['rev-parse', 'HEAD'], fork.repoDir);
+    const stubDir = tempDir('diff-uncommitted-stub');
+    const bin = writeStubClaude(stubDir, {
+      outDir: stubDir,
+      fixtureTranscript: writeMinimalTranscript(stubDir),
+      cannedJson: CANNED_RESULT,
+    });
+    // writeStubClaude's mutateRepo appends to README.md without committing.
+    const record = await executor_execute(bin, { ...fork, baseSha });
+    expect(record.error).toBeUndefined();
+    const diff = readFileSync(join(forkDir, 'executor.diff'), 'utf-8');
+    expect(diff).toContain('stub tweak');
+  });
+});
+
+/** Small helper so the uncommitted-work case reads like the committed one. */
+async function executor_execute(claudeBin: string, fork: ForkContext) {
+  const executor = createClaudeCliExecutor({ claudeBin, claudeMemRoot: CLAUDE_MEM_ROOT });
+  return executor.execute(fork, PROMPT, BUDGET);
+}

@@ -6,7 +6,7 @@ const fixture = (name: string) => join(import.meta.dir, 'fixtures', name);
 
 /** A fresh, fully valid spec table for mutation in validateRunSpec tests. */
 const baseSpec = (): Record<string, unknown> => ({
-  corpus_items: ['claude-mem-pro-001'],
+  corpus_items: ['claude-mem-pro-004'],
   observer_models: ['google/gemini-2.5-flash'],
   executors: ['claude-cli'],
   k: 1,
@@ -22,7 +22,7 @@ describe('loadRunSpec', () => {
   test('loads a valid TOML run spec', async () => {
     const spec = await loadRunSpec(fixture('valid-spec.toml'));
     expect(spec).toEqual({
-      corpus_items: ['claude-mem-pro-001', 'freckle-nail-001'],
+      corpus_items: ['claude-mem-pro-004', 'freckle-nail-001'],
       observer_models: ['google/gemini-2.5-flash', 'openai/gpt-5-mini'],
       executors: ['claude-cli', 'openrouter-agent'],
       k: 3,
@@ -124,15 +124,17 @@ describe('validateRunSpec value validation', () => {
 describe('optional Phase 6 keys', () => {
   test('accepts them when present and omits them when absent', () => {
     const withOptional = validateRunSpec(
-      { ...baseSpec(), executor_model: 'vendor/model', fork_concurrency: 3, observe_concurrency: 8 },
+      { ...baseSpec(), executor_model: 'vendor/model', cli_model: 'haiku', fork_concurrency: 3, observe_concurrency: 8 },
       'spec',
     );
     expect(withOptional.executor_model).toBe('vendor/model');
+    expect(withOptional.cli_model).toBe('haiku');
     expect(withOptional.fork_concurrency).toBe(3);
     expect(withOptional.observe_concurrency).toBe(8);
 
     const bare = validateRunSpec(baseSpec(), 'spec');
     expect('executor_model' in bare).toBe(false);
+    expect('cli_model' in bare).toBe(false);
     expect('fork_concurrency' in bare).toBe(false);
     expect('observe_concurrency' in bare).toBe(false);
   });
@@ -143,6 +145,13 @@ describe('optional Phase 6 keys', () => {
     );
     expect(() => validateRunSpec({ ...baseSpec(), executor_model: '  ' }, 'spec')).toThrow(SpecError);
     expect(() => validateRunSpec({ ...baseSpec(), executor_model: 42 }, 'spec')).toThrow(SpecError);
+  });
+
+  test('rejects an empty cli_model', () => {
+    expect(() => validateRunSpec({ ...baseSpec(), cli_model: '' }, 'spec')).toThrow(
+      'cli_model must be a non-empty string when present',
+    );
+    expect(() => validateRunSpec({ ...baseSpec(), cli_model: 7 }, 'spec')).toThrow(SpecError);
   });
 
   test('rejects zero, negative and non-integer concurrency values', () => {

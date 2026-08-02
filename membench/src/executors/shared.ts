@@ -228,14 +228,26 @@ export interface DiffCaptureResult {
  * (empty on failure) so every row has a diff artifact; reports failure
  * instead of throwing (row invariant, guard 3).
  */
-export function captureGitDiff(repoDir: string, diffPath: string): DiffCaptureResult {
+export function captureGitDiff(repoDir: string, diffPath: string, baseSha?: string): DiffCaptureResult {
   try {
     // Best-effort: a failed intent-to-add still leaves the tracked-file diff.
     Bun.spawnSync(['git', '-C', repoDir, 'add', '-N', '-A'], { stdout: 'ignore', stderr: 'ignore' });
-    const proc = Bun.spawnSync(['git', '-C', repoDir, 'diff'], { stdout: 'pipe', stderr: 'pipe' });
+    // Diff the WORKTREE against the pinned base commit. A bare `git diff`
+    // compares against HEAD, which silently returns EMPTY as soon as the agent
+    // commits its work — measured on live-smoke-2, where a claude-cli run made
+    // 13 edits + 2 writes (592 insertions), committed them, and produced a
+    // 0-byte executor.diff that also suppressed the drift judge. Diffing
+    // against the base sha captures committed, uncommitted and (via -N) new
+    // files alike.
+    const args = ['git', '-C', repoDir, 'diff'];
+    if (baseSha) args.push(baseSha);
+    const proc = Bun.spawnSync(args, { stdout: 'pipe', stderr: 'pipe' });
     writeFileSync(diffPath, proc.exitCode === 0 ? proc.stdout : new Uint8Array());
     if (proc.exitCode !== 0) {
-      return { ok: false, error: `git diff exited ${proc.exitCode}: ${proc.stderr.toString().trim()}` };
+      return {
+        ok: false,
+        error: `git diff${baseSha ? ` ${baseSha}` : ''} exited ${proc.exitCode}: ${proc.stderr.toString().trim()}`,
+      };
     }
     return { ok: true };
   } catch (error: unknown) {

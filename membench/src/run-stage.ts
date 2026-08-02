@@ -307,6 +307,22 @@ export interface ExecuteStageDeps {
   readinessTimeoutMs?: number;
 }
 
+/**
+ * What the cost gate needs to reserve headroom for cells that are already
+ * running. The ceiling can only be checked against REPORTED spend, and an
+ * in-flight cell has reported nothing yet, so without this a run overshoots by
+ * up to (concurrency x cost of one run) — measured on live-smoke-2: $6.74
+ * against a $5.00 ceiling.
+ */
+export interface CellGateContext {
+  /** Lane of the cell about to be scheduled. */
+  lane: ExecutorName;
+  /** Cells already executing, excluding the one being scheduled. */
+  inFlight: number;
+  /** Highest reported cost seen so far in each lane THIS run. */
+  maxObservedByLane: Partial<Record<ExecutorName, number>>;
+}
+
 export interface ExecuteStageOptions {
   runId: string;
   runsDir: string;
@@ -328,7 +344,7 @@ export interface ExecuteStageOptions {
    * stay retryable on --resume, and a synthetic "skipped" row would instead
    * mark it permanently done.
    */
-  beforeCell?: () => 'continue' | 'stop';
+  beforeCell?: (context: CellGateContext) => 'continue' | 'stop';
   /** Cost governance hook, called after each item. 'stop' halts the stage. */
   betweenItems?: (itemId: string) => Promise<'continue' | 'stop'> | 'continue' | 'stop';
   log?: (message: string) => void;
@@ -398,6 +414,9 @@ export async function runExecuteStage(options: ExecuteStageOptions): Promise<Exe
       }
     }
 
+    let inFlight = 0;
+    const maxObservedByLane: Partial<Record<ExecutorName, number>> = {};
+
     await mapWithConcurrency(cells, concurrency, async (cell) => {
       const key = cellKey(cell.item.id, cell.plan.variant, cell.executor, cell.run_index);
       if (completed.has(key)) {
@@ -409,12 +428,15 @@ export async function runExecuteStage(options: ExecuteStageOptions): Promise<Exe
         cellsAbandoned += 1;
         return;
       }
-      if (beforeCell?.() === 'stop') {
+      if (beforeCell?.({ lane: cell.executor, inFlight, maxObservedByLane }) === 'stop') {
         abandonRemaining = true;
         cellsAbandoned += 1;
         return;
       }
-      const row = await runCell(cell, {
+      inFlight += 1;
+      let row: ResultRow;
+      try {
+        row = await runCell(cell, {
         runId,
         runsDir,
         taskMd,
@@ -424,7 +446,14 @@ export async function runExecuteStage(options: ExecuteStageOptions): Promise<Exe
         judgePath,
         tracker,
         log,
-      });
+        });
+      } finally {
+        inFlight -= 1;
+      }
+      if (typeof row.cost_usd === 'number' && Number.isFinite(row.cost_usd)) {
+        const seen = maxObservedByLane[cell.executor];
+        if (seen === undefined || row.cost_usd > seen) maxObservedByLane[cell.executor] = row.cost_usd;
+      }
       // Immediately per run, never batched (plan Phase 6.3) — the jsonl mutex
       // serializes concurrent cells.
       await appendJsonl(resultsPath, row);

@@ -10,17 +10,81 @@
 #
 # Model ids come from the plan's observer pool; they are not locked — edit
 # them here (this file is the reviewable record of what a run actually ran).
-
-corpus_items = ["claude-mem-pro-001"]
-observer_models = ["anthropic/claude-haiku-4-5", "xiaomi/mimo-v2-flash:free"]
+#
+# --- SUBSTITUTION SUMMARY vs the plan's observer pool (plan line 12) ---
+# Verified 2026-08-01 against the live https://openrouter.ai/api/v1/models
+# catalog. The pool's ids are written with dashes; OpenRouter uses dots, and
+# NEITHER original observer id resolves:
+#   anthropic/claude-haiku-4-5   -> absent (live id: anthropic/claude-haiku-4.5)
+#   xiaomi/mimo-v2-flash:free    -> absent (live xiaomi: mimo-v2.5, mimo-v2.5-pro;
+#                                   there is no free flash tier)
+#
+# Cost, not just naming, decides the observer. The observe pass replays an
+# item's tool calls as ONE growing conversation — the full history is re-sent
+# every turn and the harness sets no cache_control — so cumulative PROMPT
+# tokens dwarf everything else and the observer's INPUT price is the whole
+# bill. Measured on live-smoke-1 (claude-mem-pro-001, 95 tool calls): deepseek
+# reported 7,301,382 prompt tokens for a single pass. At Haiku 4.5's $1.00/M
+# that one pass is ~$6.94 — more than this spec's entire $5 ceiling. So an
+# Anthropic observer is not a budget option, and the two cheapest models with
+# enough context are used instead:
+#   observer 1: deepseek/deepseek-v4-flash  (EXACT plan-pool id, 1.05M ctx;
+#               its automatic prefix caching billed $0.35 where list price
+#               said $1.02)
+#   observer 2: qwen/qwen3.7-flash          (replaces the xiaomi free-flash
+#               slot: current cheap flash tier, 1M ctx. The pool's own qwen
+#               entry qwen3.6-27b is ~10x the input price for the same job;
+#               the pool's openai/gpt-oss-20b is 131k ctx and would overflow.)
+# Both observers are kept UNCHANGED from live-smoke-1 so the two runs share
+# measured rates and the sponsor cost table stays coherent across them.
+#
+# Context headroom matters per item: claude-mem-pro-004's 142 tool calls make
+# the final replay turn ~311k tokens, so an observer needs >=350k context. Both
+# chosen models (1.0M / 1.05M) clear it; most sub-300k models would not.
+#
+# MEASURED on live-smoke-2 (claude-mem-pro-004) — the observe pass is the whole
+# budget story, and it scales SUPERLINEARLY with session length:
+#   deepseek/deepseek-v4-flash  $1.8142   30,671,765 prompt tokens  130 obs
+#   qwen/qwen3.7-flash          $2.9909   34,122,679 prompt tokens  150 obs
+#   observe subtotal            $4.8050
+# That is 4.5x the prompt tokens of claude-mem-pro-001 (7.3M) for only 1.5x the
+# tool calls, because every turn re-sends a history that each reply grows. The
+# observe pass alone consumed 96% of a $5 ceiling before any fork-run started,
+# and live-smoke-2 halted with 8 of 10 cells unrun.
+#
+# BUDGETING GUIDANCE (max_cost_usd below is left at 5.0 on purpose — the ceiling
+# is the operator's call, not this file's): for a 1-item x 2-observer smoke on
+# an item this size, budget roughly $5 for observe + ~$1.6/fork-run in the
+# claude-cli lane (measured $1.5894, and that lane has NO mid-run cost stop)
+# + ~$0.34/fork-run in the openrouter-agent lane + ~$0.005/judge call. Prefer
+# raising the ceiling deliberately over discovering it mid-run: a halt after
+# the observe pass has already spent the money buys nothing.
+#
+# judge_model / executor_model keep Anthropic Haiku — only the id is corrected
+# (-4-5 -> -4.5). Those are short calls, not the growing replay, so Haiku is
+# affordable there and keeps the executor lane comparable to production.
+corpus_items = ["claude-mem-pro-004"]
+observer_models = ["deepseek/deepseek-v4-flash", "qwen/qwen3.7-flash"]
 executors = ["claude-cli", "openrouter-agent"]
 k = 1
 
-observe_timeout_s = 600
+# Per-(item, model) budget for the WHOLE replay, not per turn
+# (observe-stage.ts:316 wraps the entire replay in one AbortSignal.timeout).
+# The original 600s was ~6s/turn, which the growing prompts cannot meet; a
+# timeout also discards the real money already spent on completed turns.
+# claude-mem-pro-004 is 143 turns ending at a ~311k-token prompt, so keep this
+# generous — a stall here wastes dollars, not seconds.
+observe_timeout_s = 3600
 execute_timeout_s = 1800
 
-judge_model = "anthropic/claude-haiku-4-5"
-executor_model = "anthropic/claude-haiku-4-5"
+judge_model = "anthropic/claude-haiku-4.5"
+executor_model = "anthropic/claude-haiku-4.5"
+
+# claude-cli lane model (--model alias, NOT an OpenRouter id). Unpinned, the
+# CLI inherits the account default (Opus on a Max plan) and this lane's
+# reported cost counts against max_cost_usd, so a single run could halt the
+# matrix. "haiku" keeps the two lanes comparable (both Haiku 4.5).
+cli_model = "haiku"
 
 # Hard co-limit with --approve-cost-usd: whichever is smaller wins.
 max_cost_usd = 5.0

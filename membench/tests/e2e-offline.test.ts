@@ -657,10 +657,17 @@ describe('governance', () => {
       '0.05',
     ]);
     expect(first).toBe(2); // stopped early, resumable
-    expect(harness.logs.join('\n')).toContain('COST CEILING REACHED');
+    // The gate reserves headroom for in-flight cells, so it trips on the
+    // PROJECTED crossing rather than waiting for reported spend to exceed the
+    // ceiling (which is what let live-smoke-2 finish at $6.74/$5.00).
+    expect(harness.logs.join('\n')).toContain('COST CEILING would be crossed');
+    expect(harness.logs.join('\n')).toContain('reserved for 1 in-flight run(s)');
     // The pre-flight stops at the FIRST cell after the ceiling is crossed, so
     // the stop lands mid-item; abandoned cells wrote no rows at all.
     expect(harness.logs.join('\n')).toContain('abandoned unrun');
+    // Real spend never got the chance to exceed the approved ceiling.
+    const spentLine = harness.logs.join('\n').match(/REAL SPEND: \$([0-9.]+) \(reported costs only\)\s*$/m);
+    expect(Number(spentLine?.[1] ?? Infinity)).toBeLessThanOrEqual(0.05);
 
     const partial = await harness.rows('e2e-resume');
     expect(partial.length).toBeGreaterThan(0);

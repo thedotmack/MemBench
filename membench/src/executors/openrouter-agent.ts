@@ -548,7 +548,7 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
 
         try {
           const diffPath = join(forkDir, 'executor.diff');
-          const diff = captureGitDiff(fork.repoDir, diffPath);
+          const diff = captureGitDiff(fork.repoDir, diffPath, fork.baseSha);
           record.diff_path = diffPath;
           if (!diff.ok && !record.error) record.error = diff.error ?? 'diff capture failed';
         } catch (error: unknown) {

@@ -223,8 +223,25 @@ bun src/cli.ts run --spec ../run-specs/smoke-1item.toml --run-id smoke-1 --resum
 - Every fork gets its own `CLAUDE_MEM_DATA_DIR`, its own worker port and its own
   `HOME`. Nothing ever points at your real `~/.claude-mem`.
 
-`OPENROUTER_API_KEY`, `CLAUDE_MEM_ROOT` and `MEMBENCH_RUNS_DIR` are env-only —
-they are secrets or machine-local paths and are rejected if put in a spec.
+`OPENROUTER_API_KEY`, `CLAUDE_MEM_ROOT`, `MEMBENCH_RUNS_DIR` and
+`MEMBENCH_CLAUDE_CREDENTIALS_FILE` are env-only — they are secrets or
+machine-local paths and are rejected if put in a spec.
+
+| env var | what it does |
+|---|---|
+| `OPENROUTER_API_KEY` | observer, openrouter-agent executor and judge calls |
+| `CLAUDE_MEM_ROOT` | claude-mem checkout used for the per-fork workers |
+| `MEMBENCH_RUNS_DIR` | where `runs/<run-id>/` trees are written (default `./runs`) |
+| `MEMBENCH_CLAUDE_CREDENTIALS_FILE` | explicit `.credentials.json` for the `claude-cli` lane, overriding host lookup |
+
+### Cost governance
+
+The ceiling is enforced on REPORTED spend, and fork-runs additionally reserve
+headroom for cells still in flight so concurrency cannot overshoot it. One
+residual softness is by design: the `claude-cli` lane has no mid-run cost stop
+(wall-clock timeout only), so before its first row lands there is no measured
+worst case to price it at and that first run can exceed the ceiling on its own.
+Runs print this caveat when the lane is selected.
 
 ---
 
@@ -301,6 +318,11 @@ additionally needs `OPENROUTER_API_KEY`, a claude-mem checkout
 (`CLAUDE_MEM_ROOT`) for the per-fork workers, and — for the `claude-cli` lane —
 the Claude Code CLI on `PATH`. Live runs are local-machine only: remote
 sandboxes block `openrouter.ai`.
+
+`claude-cli` credentials are resolved host-side (macOS Keychain, looked up
+account-qualified, or a `.credentials.json` / `MEMBENCH_CLAUDE_CREDENTIALS_FILE`),
+seeded into the isolated fork `HOME` as `.claude/.credentials.json` mode `0600`,
+and scrubbed on every exit path so live tokens never persist in a kept fork dir.
 
 Every published number is reproducible from this repo: the corpus is
 content-hashed and frozen, the spec is committed, `results.jsonl` carries one

@@ -92,6 +92,13 @@ export interface ForkContext {
    * re-reading provenance.
    */
   projectSlug: string;
+  /**
+   * The item's pinned base commit (repo.lock `commit`), i.e. the exact tree the
+   * fork started from. Executor diffs are taken against THIS sha rather than
+   * the worktree HEAD, so work an agent committed still shows up (see
+   * captureGitDiff).
+   */
+  baseSha: string;
 }
 
 /**

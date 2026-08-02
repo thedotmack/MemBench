@@ -578,6 +578,7 @@ export async function prepareFork(
   const fork: PreparedFork = {
     repoDir,
     homeDir,
+    baseSha: lock.commit,
     workerPort: port,
     dataDir,
     injectionBlock: '',

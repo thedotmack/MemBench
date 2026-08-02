@@ -46,6 +46,16 @@ export interface RunSpec {
    */
   executor_model?: string;
   /**
+   * Model the `claude-cli` executor lane runs, passed through as `--model`
+   * (an alias like "haiku"/"sonnet"/"opus" or a full Anthropic model name —
+   * NOT an OpenRouter id). Absent = whatever the CLI/account defaults to,
+   * which on a Max account is the Opus tier: measured 2026-08-01, pinning
+   * `haiku` cut a trivial run from $0.067 to $0.016. Because this lane's
+   * reported cost counts against the run's cost ceiling, leaving it unset
+   * can halt a run long before the matrix completes.
+   */
+  cli_model?: string;
+  /**
    * How many forks may be live at once. Each fork spawns its own claude-mem
    * worker, so this is a machine-load knob; it lives in the spec because it
    * is part of what a published run declares. Default 2 (Phase 6).
@@ -73,6 +83,7 @@ const KNOWN_KEYS: readonly (keyof RunSpec)[] = [
 /** Keys a spec MAY declare (absent = the Phase 6 default documented above). */
 const OPTIONAL_KEYS: readonly (keyof RunSpec)[] = [
   'executor_model',
+  'cli_model',
   'fork_concurrency',
   'observe_concurrency',
 ];
@@ -122,6 +133,7 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
     max_steps,
     max_cost_per_run_usd,
     executor_model,
+    cli_model,
     fork_concurrency,
     observe_concurrency,
   } = table;
@@ -171,6 +183,9 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
   if (executor_model !== undefined && (typeof executor_model !== 'string' || executor_model.trim() === '')) {
     throw new SpecError(`${source}: executor_model must be a non-empty string when present`);
   }
+  if (cli_model !== undefined && (typeof cli_model !== 'string' || cli_model.trim() === '')) {
+    throw new SpecError(`${source}: cli_model must be a non-empty string when present`);
+  }
   if (fork_concurrency !== undefined && !isPositiveInteger(fork_concurrency)) {
     throw new SpecError(`${source}: fork_concurrency must be a positive integer when present`);
   }
@@ -191,6 +206,7 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
     max_cost_per_run_usd,
     // Spread-when-present: an absent optional key stays absent on the object.
     ...(executor_model !== undefined ? { executor_model } : {}),
+    ...(cli_model !== undefined ? { cli_model } : {}),
     ...(fork_concurrency !== undefined ? { fork_concurrency } : {}),
     ...(observe_concurrency !== undefined ? { observe_concurrency } : {}),
   };

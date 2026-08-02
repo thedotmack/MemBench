@@ -703,6 +703,13 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
         `(min of --approve-cost-usd ${Number.isFinite(approved) ? `$${approved.toFixed(4)}` : 'unset'} ` +
         `and spec.max_cost_usd $${spec.max_cost_usd.toFixed(4)}).`,
     );
+    if (spec.executors.includes('claude-cli')) {
+      log(
+        '   Ceiling softness: fork-runs reserve headroom for in-flight cells, but the ' +
+          'claude-cli lane has NO mid-run cost stop (wall-clock timeout only), so its first ' +
+          'run is unbounded and can overshoot on its own.',
+      );
+    }
   }
   if (!flags.mock) {
     const rates = await readMeasuredRates(runsDir);
@@ -826,7 +833,17 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
    *   - spend is unbounded-unknown: nothing reported a cost yet, but enough
    *     calls came back without one that the ceiling protects nothing
    */
-  const stopReason = (): string | undefined => {
+  const stopReason = (reserveUsd = 0, reserveNote = ''): string | undefined => {
+    if (reserveUsd > 0 && tracker.knownUsd + reserveUsd >= ceiling) {
+      return (
+        `COST CEILING would be crossed: real reported spend $${tracker.knownUsd.toFixed(4)} + ` +
+        `$${reserveUsd.toFixed(4)} reserved${reserveNote} >= effective ceiling $${ceiling.toFixed(4)}.`
+      );
+    }
+    return plainStopReason();
+  };
+
+  const plainStopReason = (): string | undefined => {
     if (tracker.knownUsd >= ceiling) {
       return (
         `COST CEILING REACHED: real reported spend $${tracker.knownUsd.toFixed(4)} >= ` +
@@ -857,11 +874,46 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
     );
   };
 
-  const preflight = (): 'continue' | 'stop' => {
-    const reason = stopReason();
+  const preflight = (reserveUsd = 0, reserveNote = ''): 'continue' | 'stop' => {
+    const reason = stopReason(reserveUsd, reserveNote);
     if (!reason) return 'continue';
     reportStop(reason);
     return 'stop';
+  };
+
+  /**
+   * Headroom-aware gate for a fork-run. The plain ceiling check only sees
+   * REPORTED spend, and a cell that is still running has reported nothing, so
+   * concurrent cells are invisible to it: live-smoke-2 finished at $6.7356
+   * against a $5.0000 ceiling because a $1.59 claude-cli cell was already in
+   * flight when the ceiling tripped.
+   *
+   * So before scheduling, reserve budget for the cells ALREADY IN FLIGHT,
+   * priced at the worst per-run cost seen so far in any lane this run.
+   * spec.max_cost_per_run_usd seeds the estimate for the openrouter-agent
+   * lane, where it is a genuinely enforced per-run cap. Nothing is reserved
+   * for the cell being scheduled — the ceiling is a spend limit, not a
+   * pre-authorization, and reserving for it would abandon affordable work.
+   *
+   * RESIDUAL SOFTNESS (documented, not fixable here): the claude-cli lane has
+   * no mid-run cost stop by design — only a wall-clock timeout — so until its
+   * first row lands there is no measured worst case to price it at, and that
+   * first run can still overshoot on its own.
+   */
+  const cellPreflight = (context: {
+    lane: ExecutorName;
+    inFlight: number;
+    maxObservedByLane: Partial<Record<ExecutorName, number>>;
+  }): 'continue' | 'stop' => {
+    if (context.inFlight <= 0) return preflight();
+    const estimateFor = (lane: ExecutorName): number =>
+      context.maxObservedByLane[lane] ??
+      // Only the SDK lane has an enforced per-run cap to fall back on.
+      (lane === 'openrouter-agent' ? spec.max_cost_per_run_usd : 0);
+    const perRun = Math.max(0, ...spec.executors.map(estimateFor));
+    if (perRun <= 0) return preflight();
+    const note = ` for ${context.inFlight} in-flight run(s) at $${perRun.toFixed(4)}/run`;
+    return preflight(perRun * context.inFlight, note);
   };
 
   const ceilingCheck = (stage: string) => (itemId: string): 'continue' | 'stop' => {
@@ -938,7 +990,7 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       completed,
       concurrency: forkConcurrency,
       tracker,
-      beforeCell: preflight,
+      beforeCell: cellPreflight,
       betweenItems: ceilingCheck('execute'),
       log,
     });
@@ -981,8 +1033,24 @@ async function buildLiveExecutors(
   const executors: Partial<Record<ExecutorName, import('./types.js').Executor>> = {};
   for (const lane of spec.executors) {
     if (lane === 'claude-cli') {
-      const { createClaudeCliExecutor } = await import('./executors/claude-cli.js');
-      executors[lane] = createClaudeCliExecutor({ claudeMemRoot });
+      const { createClaudeCliExecutor, resolveClaudeCredentials } = await import(
+        './executors/claude-cli.js'
+      );
+      // The fork HOME is isolated (guard 4), so the CLI has no credentials
+      // unless we seed them. Resolved once per run and reused for every fork.
+      const credentialsJson = resolveClaudeCredentials();
+      if (!credentialsJson) {
+        throw new RunCommandError(
+          'the claude-cli lane found no Claude Code credentials to seed into the isolated fork HOME.\n' +
+            '  Run `claude login` on this host, or point MEMBENCH_CLAUDE_CREDENTIALS_FILE at a\n' +
+            '  .credentials.json. Without it every fork-run fails "Not logged in".',
+        );
+      }
+      executors[lane] = createClaudeCliExecutor({
+        claudeMemRoot,
+        credentialsJson,
+        ...(spec.cli_model ? { model: spec.cli_model } : {}),
+      });
     } else {
       if (!spec.executor_model) {
         throw new RunCommandError(
