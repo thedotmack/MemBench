@@ -24,7 +24,6 @@ import { scoreMain } from '../src/scoreboard.ts';
 import {
   estimateCost,
   computeCallMatrix,
-  observeMain,
   readMeasuredRates,
   runMain,
   type RunOverrides,
@@ -126,7 +125,7 @@ beforeEach(async () => {
     errors,
     prompts,
     run: (args, overrides) => runMain([...args, ...baseArgs], withDefaults(overrides)),
-    observe: (args, overrides) => observeMain([...args, ...baseArgs], withDefaults(overrides)),
+    observe: (args, overrides) => runMain([...args, ...baseArgs, '--observe-only'], withDefaults(overrides)),
     runDir: (runId: string) => join(runsDir, runId),
     rows: (runId: string) => readJsonl<ResultRow>(join(runsDir, runId, 'results.jsonl')),
   };
@@ -403,12 +402,22 @@ describe('governance', () => {
         obs_cost_usd: 0.02,
       }),
     );
+    const liveRow = (executor: string, runIndex: number, costUsd: number | null) =>
+      JSON.stringify({
+        run_id: 'prior-live',
+        item_id: 'mini-001',
+        variant: 'none',
+        executor,
+        run_index: runIndex,
+        success: true,
+        cost_usd: costUsd,
+      });
     writeFileSync(
       join(live, 'results.jsonl'),
       [
-        JSON.stringify({ executor: 'claude-cli', cost_usd: 0.5 }),
-        JSON.stringify({ executor: 'claude-cli', cost_usd: 0.7 }),
-        JSON.stringify({ executor: 'openrouter-agent', cost_usd: null }),
+        liveRow('claude-cli', 0, 0.5),
+        liveRow('claude-cli', 1, 0.7),
+        liveRow('openrouter-agent', 0, null),
       ].join('\n') + '\n',
     );
     writeFileSync(join(live, 'judge.jsonl'), JSON.stringify({ cost_usd: 0.001 }) + '\n');
@@ -427,7 +436,7 @@ describe('governance', () => {
     expect(rates.executors['claude-cli'].meanUsd).toBeCloseTo(0.6, 10);
     // A row without a reported cost is an UNKNOWN, never a $0 sample.
     expect(rates.executors['openrouter-agent'].meanUsd).toBeNull();
-    expect(rates.executors['openrouter-agent'].unknown).toBe(1);
+    expect(rates.executors['openrouter-agent'].unreported).toBe(1);
 
     const spec = await loadRunSpec(SPEC_ONE_ITEM);
     const matrix = computeCallMatrix(spec);

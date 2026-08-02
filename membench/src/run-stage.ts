@@ -53,8 +53,6 @@ import type {
 } from './types.js';
 import type { ParsedObservation } from './vendor/parser.js';
 
-export class RunStageError extends Error {}
-
 /** The three control variants, in the order they are planned after the models. */
 export const CONTROL_VARIANTS: readonly Variant[] = ['none', 'oracle', 'shuffled'];
 
@@ -62,7 +60,7 @@ export const CONTROL_VARIANTS: readonly Variant[] = ['none', 'oracle', 'shuffled
 // Spend tracking (guard 1 / plan Phase 6.4: unknowns are surfaced, never 0)
 // ---------------------------------------------------------------------------
 
-export type SpendSource = 'obs' | 'executor' | 'judge';
+type SpendSource = 'obs' | 'executor' | 'judge';
 
 /**
  * Cumulative REAL spend for a run. A missing cost is NEVER counted as 0 for
@@ -71,54 +69,34 @@ export type SpendSource = 'obs' | 'executor' | 'judge';
  * the provider did not report".
  */
 export interface SpendTracker {
-  add(source: SpendSource, costUsd: number | null | undefined, label: string): void;
+  add(source: SpendSource, costUsd: number | null | undefined): void;
   /** Sum of REPORTED costs only. */
   readonly knownUsd: number;
   /** Number of calls/runs whose cost was not reported. */
   readonly unknownCount: number;
-  readonly unknownLabels: string[];
   readonly bySource: Record<SpendSource, { knownUsd: number; unknownCount: number }>;
 }
 
-export function createSpendTracker(initial?: {
-  knownUsd?: number;
-  unknownCount?: number;
-  unknownLabels?: string[];
-}): SpendTracker {
-  const bySource: Record<SpendSource, { knownUsd: number; unknownCount: number }> = {
-    obs: { knownUsd: 0, unknownCount: 0 },
-    executor: { knownUsd: 0, unknownCount: 0 },
-    judge: { knownUsd: 0, unknownCount: 0 },
-  };
-  const state = {
-    knownUsd: initial?.knownUsd ?? 0,
-    unknownCount: initial?.unknownCount ?? 0,
-    unknownLabels: [...(initial?.unknownLabels ?? [])],
-  };
-  return {
-    add(source, costUsd, label) {
+export function createSpendTracker(): SpendTracker {
+  const tracker = {
+    knownUsd: 0,
+    unknownCount: 0,
+    bySource: {
+      obs: { knownUsd: 0, unknownCount: 0 },
+      executor: { knownUsd: 0, unknownCount: 0 },
+      judge: { knownUsd: 0, unknownCount: 0 },
+    } as Record<SpendSource, { knownUsd: number; unknownCount: number }>,
+    add(source: SpendSource, costUsd: number | null | undefined): void {
       if (typeof costUsd === 'number' && Number.isFinite(costUsd)) {
-        state.knownUsd += costUsd;
-        bySource[source].knownUsd += costUsd;
+        tracker.knownUsd += costUsd;
+        tracker.bySource[source].knownUsd += costUsd;
         return;
       }
-      state.unknownCount += 1;
-      bySource[source].unknownCount += 1;
-      // Cap the label list so a long run cannot balloon memory; the COUNT is
-      // always exact, only the examples are capped.
-      if (state.unknownLabels.length < 50) state.unknownLabels.push(`${source}: ${label}`);
+      tracker.unknownCount += 1;
+      tracker.bySource[source].unknownCount += 1;
     },
-    get knownUsd() {
-      return state.knownUsd;
-    },
-    get unknownCount() {
-      return state.unknownCount;
-    },
-    get unknownLabels() {
-      return state.unknownLabels;
-    },
-    bySource,
   };
+  return tracker;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +141,7 @@ export function resolveShuffledSources(
   const index = candidates.indexOf(only);
   const donor = candidates.find((id, i) => id !== only && i > index) ?? candidates.find((id) => id !== only);
   if (!donor) {
-    throw new RunStageError(
+    throw new Error(
       `the shuffled control needs another corpus item's notes, but ${only} is the only item in the corpus`,
     );
   }
@@ -181,7 +159,7 @@ export interface VariantPlan {
   blocked?: string;
 }
 
-export interface BuildVariantPlansOptions {
+interface BuildVariantPlansOptions {
   item: LoadedItem;
   models: string[];
   /** Stage-1 records, keyed by observeKey(itemId, model). */
@@ -233,7 +211,7 @@ export async function buildVariantPlans(options: BuildVariantPlansOptions): Prom
     } else {
       const donorRecord = obsRecords.get(observeKey(shuffled.donor_item, shuffled.donor_source));
       if (!donorRecord || donorRecord.error) {
-        throw new RunStageError(
+        throw new Error(
           `donor observations unavailable (${shuffled.donor_item} × ${shuffled.donor_source}${
             donorRecord?.error ? `: ${donorRecord.error}` : ''
           })`,
@@ -254,7 +232,7 @@ export async function buildVariantPlans(options: BuildVariantPlansOptions): Prom
 // ---------------------------------------------------------------------------
 
 /** One planned fork-run. */
-export interface RunCell {
+interface RunCell {
   item: LoadedItem;
   plan: VariantPlan;
   executor: ExecutorName;
@@ -266,7 +244,7 @@ export interface RunCell {
  * JSON-encoded array: unambiguous (no separator can occur inside a component)
  * and plain text, so the plan's audit greps never treat this file as binary.
  */
-export function cellKey(itemId: string, variant: string, executor: string, runIndex: number): string {
+function cellKey(itemId: string, variant: string, executor: string, runIndex: number): string {
   return JSON.stringify([itemId, variant, executor, runIndex]);
 }
 
@@ -298,7 +276,6 @@ export interface ExecuteStageDeps {
   query?: QueryModelFn;
   apiKey?: string;
   claudeMemRoot?: string;
-  readinessTimeoutMs?: number;
 }
 
 /**
@@ -308,7 +285,7 @@ export interface ExecuteStageDeps {
  * up to (concurrency x cost of one run) — measured on live-smoke-2: $6.74
  * against a $5.00 ceiling.
  */
-export interface CellGateContext {
+interface CellGateContext {
   /** Lane of the cell about to be scheduled. */
   lane: ExecutorName;
   /** Cells already executing, excluding the one being scheduled. */
@@ -317,7 +294,7 @@ export interface CellGateContext {
   maxObservedByLane: Partial<Record<ExecutorName, number>>;
 }
 
-export interface ExecuteStageOptions {
+interface ExecuteStageOptions {
   runId: string;
   runsDir: string;
   /** runs/<run_id>/ */
@@ -344,7 +321,7 @@ export interface ExecuteStageOptions {
   log?: (message: string) => void;
 }
 
-export interface ExecuteStageResult {
+interface ExecuteStageResult {
   rowsWritten: number;
   rowsSkipped: number;
   /** Cells abandoned by the beforeCell pre-flight (no rows written). */
@@ -395,7 +372,7 @@ export async function runExecuteStage(options: ExecuteStageOptions): Promise<Exe
     const plans = plansByItem.get(item.id) ?? [];
     const taskPath = join(item.dir, 'task.md');
     if (!existsSync(taskPath)) {
-      throw new RunStageError(`corpus item ${item.id} has no task.md`);
+      throw new Error(`corpus item ${item.id} has no task.md`);
     }
     const taskMd = await Bun.file(taskPath).text();
 
@@ -491,7 +468,7 @@ interface RunCellContext {
  * One fork-run, from fork prep to measured row. Never throws: every failure
  * path returns a complete ResultRow with `error` set (guard 3).
  */
-export async function runCell(cell: RunCell, context: RunCellContext): Promise<ResultRow> {
+async function runCell(cell: RunCell, context: RunCellContext): Promise<ResultRow> {
   const { runId, runsDir, taskMd, budget, judgeModel, deps, judgePath, tracker, log } = context;
   const { item, plan, executor: executorName, run_index } = cell;
 
@@ -550,7 +527,6 @@ export async function runCell(cell: RunCell, context: RunCellContext): Promise<R
       ...(deps.spawnWorker ? { spawnWorker: deps.spawnWorker } : {}),
       ...(deps.cloneRepo ? { cloneRepo: deps.cloneRepo } : {}),
       ...(deps.killTree ? { killTree: deps.killTree } : {}),
-      ...(deps.readinessTimeoutMs !== undefined ? { readinessTimeoutMs: deps.readinessTimeoutMs } : {}),
     });
   } catch (error: unknown) {
     row.error = `fork preparation failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -586,11 +562,7 @@ export async function runCell(cell: RunCell, context: RunCellContext): Promise<R
   if (typeof record.cost_usd === 'number') row.cost_usd = record.cost_usd;
   row.mem_search_calls = record.mem_search_calls;
   if (record.error) row.error = record.error;
-  tracker?.add(
-    'executor',
-    record.cost_usd,
-    `${item.id} ${plan.variant} ${executorName} #${run_index}`,
-  );
+  tracker?.add('executor', record.cost_usd);
 
   try {
     const measured = await measureRun({
@@ -609,11 +581,7 @@ export async function runCell(cell: RunCell, context: RunCellContext): Promise<R
     row.judged = measured.judged;
     if (measured.drift_note) row.drift_note = measured.drift_note;
     if (measured.judged) {
-      tracker?.add(
-        'judge',
-        measured.judge_cost_usd,
-        `${item.id} ${plan.variant} ${executorName} #${run_index}`,
-      );
+      tracker?.add('judge', measured.judge_cost_usd);
       await appendJsonl(judgePath, {
         run_id: runId,
         item_id: item.id,

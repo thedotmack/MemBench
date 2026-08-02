@@ -7,7 +7,7 @@
 import { costMain } from './cost-table.js';
 import { corpusMain } from './corpus.js';
 import { publishMain } from './publish.js';
-import { observeMain, runMain } from './run-command.js';
+import { runMain } from './run-command.js';
 import { scoreMain } from './scoreboard.js';
 
 const HELP = `membench — memory benchmark for claude-mem
@@ -43,7 +43,8 @@ export async function main(argv: string[]): Promise<number> {
     case 'run':
       return runMain(rest);
     case 'observe':
-      return observeMain(rest);
+      // Stage 1 only — same command, same governance.
+      return runMain([...rest, '--observe-only']);
     case 'score':
       return scoreMain(rest);
     case 'publish':

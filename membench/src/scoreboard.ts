@@ -323,6 +323,7 @@ export interface RunManifest {
   variants?: string[];
   shuffled_source_map?: Record<string, { donor_item: string; donor_source: string }>;
   approve_cost_usd?: number | null;
+  resumes?: string[];
 }
 
 export async function readManifest(runDir: string): Promise<RunManifest | null> {
@@ -822,7 +823,7 @@ function fmtPctUnits(value: number | null, digits = 1): string {
   return `${value.toFixed(digits)}%`;
 }
 
-function fmtUsd(value: number | null, digits = 4): string {
+export function fmtUsd(value: number | null, digits = 4): string {
   if (value === null || !Number.isFinite(value)) return 'n/a';
   return `$${value.toFixed(digits)}`;
 }

@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import {
   OPENROUTER_CITATION,
+  fmtUsd as usd,
   readJudgeCosts,
   readObserveRecords,
   readResultRows,
@@ -31,13 +32,11 @@ import {
 } from './scoreboard.js';
 import type { RunSpec } from './spec.js';
 
-export class CostTableError extends Error {}
-
 /** Control variants added to every item's matrix: none, oracle, shuffled. */
 export const CONTROL_VARIANT_COUNT = 3;
 
 /** The cost-specific rider on the single shared OpenRouter citation. */
-export const COST_CITATION_SUFFIX =
+const COST_CITATION_SUFFIX =
   'Every measured number below is a reported `usage.cost` (for the `claude-cli` lane, the cost the CLI ' +
   'itself reported). Nothing here is priced from a rate table.';
 
@@ -56,7 +55,7 @@ export interface PassRate {
   meanUsd: number | null;
 }
 
-function emptyRate(label: string): PassRate {
+export function emptyRate(label: string): PassRate {
   return { label, calls: 0, unreported: 0, totalUsd: 0, meanUsd: null };
 }
 
@@ -70,7 +69,7 @@ function fold(rate: PassRate, costUsd: number | null | undefined): void {
   rate.unreported += 1;
 }
 
-function merge(target: PassRate, source: PassRate): void {
+export function merge(target: PassRate, source: PassRate): void {
   target.totalUsd += source.totalUsd;
   target.calls += source.calls;
   target.unreported += source.unreported;
@@ -84,8 +83,6 @@ export interface RunCostSample {
   spec: RunSpec | null;
   /** Observe pass, per observer model: one call = one (item × model) replay. */
   observeByModel: Record<string, PassRate>;
-  /** Observe pass across all models (one call = one (item × model) replay). */
-  observeAll: PassRate;
   /** Executor pass, per lane: one call = one fork-run. */
   executors: Record<string, PassRate>;
   /** Judge pass: one call = one judged run. */
@@ -101,6 +98,15 @@ export interface RunCostSample {
   totalUnreported: number;
 }
 
+/** The observe pass across all models, derived from the per-model rates. */
+export function observeAllRate(sample: Pick<RunCostSample, 'observeByModel'>): PassRate {
+  const all = emptyRate('observe (all models)');
+  for (const model of Object.keys(sample.observeByModel).sort()) {
+    merge(all, sample.observeByModel[model]);
+  }
+  return all;
+}
+
 /** Read one run dir into a cost sample. Never invents a number. */
 export async function readRunCostSample(
   runDir: string,
@@ -108,9 +114,9 @@ export async function readRunCostSample(
   warn: (message: string) => void = () => {},
 ): Promise<RunCostSample> {
   const problem = runIdError(runId);
-  if (problem) throw new CostTableError(problem);
+  if (problem) throw new Error(problem);
   if (!existsSync(runDir)) {
-    throw new CostTableError(`run directory not found: ${runDir}`);
+    throw new Error(`run directory not found: ${runDir}`);
   }
   // Provenance first (guard 1): a run whose mock/live status is unknown must
   // never seed a rate — mock costs are non-zero, so nothing else would catch it.
@@ -119,13 +125,11 @@ export async function readRunCostSample(
   const { rows } = await readResultRows(join(runDir, 'results.jsonl'), warn);
 
   const observeByModel: Record<string, PassRate> = {};
-  const observeAll = emptyRate('observe (all models)');
   for (const record of records) {
     // A failed replay bought nothing; it is not a rate sample.
     if (typeof record.error === 'string' && record.error !== '') continue;
     observeByModel[record.model] ??= emptyRate(`observe: ${record.model}`);
     fold(observeByModel[record.model], record.obs_cost_usd);
-    fold(observeAll, record.obs_cost_usd);
   }
 
   const executors: Record<string, PassRate> = {};
@@ -138,14 +142,13 @@ export async function readRunCostSample(
   const judge = emptyRate('judge');
   for (const cost of await readJudgeCosts(runDir)) fold(judge, cost);
 
-  const rates = [observeAll, ...Object.values(executors), judge];
+  const rates = [observeAllRate({ observeByModel }), ...Object.values(executors), judge];
   const itemIds = [...new Set(rows.map((row) => row.item_id))].sort();
   return {
     runId,
     mock: manifest.mock === true,
     spec: manifest.spec ?? null,
     observeByModel,
-    observeAll,
     executors,
     judge,
     itemIds,
@@ -172,7 +175,6 @@ export function combineSamples(samples: RunCostSample[]): RunCostSample {
     mock: samples.some((sample) => sample.mock),
     spec: samples.find((sample) => sample.spec)?.spec ?? null,
     observeByModel: {},
-    observeAll: emptyRate('observe (all models)'),
     executors: {},
     judge: emptyRate('judge'),
     itemIds: [],
@@ -189,7 +191,6 @@ export function combineSamples(samples: RunCostSample[]): RunCostSample {
       combined.observeByModel[model] ??= emptyRate(`observe: ${model}`);
       merge(combined.observeByModel[model], rate);
     }
-    merge(combined.observeAll, sample.observeAll);
     for (const [lane, rate] of Object.entries(sample.executors)) {
       combined.executors[lane] ??= emptyRate(`executor: ${lane}`);
       merge(combined.executors[lane], rate);
@@ -225,7 +226,7 @@ export function combineSamples(samples: RunCostSample[]): RunCostSample {
 // ---------------------------------------------------------------------------
 
 /** What the table extrapolates TO. Defaults come from the run's own spec. */
-export interface CostTarget {
+interface CostTarget {
   models: number;
   items: number;
   k: number;
@@ -257,7 +258,7 @@ export function resolveTarget(
   };
 }
 
-export interface RouteEstimate {
+interface RouteEstimate {
   lane: string;
   /** items × Σ per-model observe means — shared with every other route. */
   observeUsd: number | null;
@@ -297,7 +298,7 @@ export function estimateObservePass(
 
   const priced = measuredMeans.slice(0, target.models);
   const blendedCount = Math.max(0, target.models - priced.length);
-  const blend = sample.observeAll.meanUsd;
+  const blend = observeAllRate(sample).meanUsd;
   if (priced.length === 0 && blendedCount > 0 && blend === null) {
     return { usd: null, measuredModels: 0, blendedModels: blendedCount };
   }
@@ -307,6 +308,17 @@ export function estimateObservePass(
   }
   const perItem = priced.reduce((sum, value) => sum + value, 0) + blendedCount * (blend ?? 0);
   return { usd: target.items * perItem, measuredModels: priced.length, blendedModels: blendedCount };
+}
+
+/**
+ * The one pricing operation in MemBench: calls × a MEASURED mean per call.
+ * No measured mean → null (collected as missing by the callers) — a component
+ * is never filled in from a price list (guard 1). Shared by the dry-run
+ * estimator (run-command.ts) and the sponsor table below.
+ */
+export function estimateUsd(calls: number, rate: PassRate | undefined): number | null {
+  const meanUsd = rate?.meanUsd ?? null;
+  return meanUsd === null ? null : calls * meanUsd;
 }
 
 /**
@@ -325,12 +337,9 @@ export function estimateRoute(sample: RunCostSample, lane: string, target: CostT
   const missing: string[] = [];
 
   const observe = estimateObservePass(sample, target);
-  const executorMean = sample.executors[lane]?.meanUsd ?? null;
-  const judgeMean = sample.judge.meanUsd;
-
   const observeUsd = observe.usd;
-  const executorUsd = executorMean === null ? null : executorRuns * executorMean;
-  const judgeUsd = judgeMean === null ? null : executorRuns * judgeMean;
+  const executorUsd = estimateUsd(executorRuns, sample.executors[lane]);
+  const judgeUsd = estimateUsd(executorRuns, sample.judge);
 
   if (observeUsd === null) missing.push('observe pass');
   if (executorUsd === null) missing.push(`executor pass (${lane})`);
@@ -356,16 +365,7 @@ export function estimateRoute(sample: RunCostSample, lane: string, target: CostT
 // ---------------------------------------------------------------------------
 
 /** Both v0.1 routes, always rendered side by side even when one has no rate. */
-export const ROUTES = ['claude-cli', 'openrouter-agent'] as const;
-
-function usd(value: number | null, digits = 4): string {
-  if (value === null || !Number.isFinite(value)) return 'n/a';
-  return `$${value.toFixed(digits)}`;
-}
-
-function measured(value: number | null, digits = 4): string {
-  return value === null ? 'n/a (nothing reported)' : `${usd(value, digits)} **measured**`;
-}
+const ROUTES = ['claude-cli', 'openrouter-agent'] as const;
 
 function extrapolated(value: number | null, digits = 4): string {
   return value === null ? 'n/a (no measured rate)' : `${usd(value, digits)} **extrapolated**`;
@@ -378,7 +378,7 @@ function rateRow(rate: PassRate): string {
   );
 }
 
-export interface CostTableInput {
+interface CostTableInput {
   samples: RunCostSample[];
   combined: RunCostSample;
   target: CostTarget;
@@ -388,170 +388,124 @@ export interface CostTableInput {
 /** Render the sponsor-facing markdown cost table. */
 export function renderCostTable(input: CostTableInput): string {
   const { samples, combined, target } = input;
-  const lines: string[] = [];
   const routes = ROUTES.map((lane) => estimateRoute(combined, lane, target));
+  const observeAll = observeAllRate(combined);
 
-  lines.push('# MemBench cost estimate');
-  lines.push('');
-  lines.push(
-    `Source run(s): ${samples.map((sample) => `\`${sample.runId}\``).join(', ')} · generated ${(input.generatedAt ?? new Date()).toISOString()}`,
-  );
-  lines.push('');
-  if (combined.mock) {
-    lines.push(
-      '> **MOCK DATA — at least one source run is a `--mock` run whose costs are fabricated by the offline ' +
-        'mocks.** This table is structurally valid but its numbers describe nothing real. Do not send it to a sponsor.',
-    );
-    lines.push('');
-  }
-  lines.push(`${OPENROUTER_CITATION} ${COST_CITATION_SUFFIX}`);
-  lines.push('');
-  if (combined.specConflicts && combined.specConflicts.length > 0) {
-    lines.push(
-      '> **The source runs did not run the same matrix.** The extrapolation defaults come from the first ' +
-        "run's spec; the measured means pool runs that differ:",
-    );
-    for (const conflict of combined.specConflicts) lines.push(`> - ${conflict}`);
-    lines.push('');
-  }
+  const mockBanner = combined.mock
+    ? '> **MOCK DATA — at least one source run is a `--mock` run whose costs are fabricated by the offline ' +
+      'mocks.** This table is structurally valid but its numbers describe nothing real. Do not send it to a sponsor.\n\n'
+    : '';
+  const conflictBlock =
+    combined.specConflicts && combined.specConflicts.length > 0
+      ? '> **The source runs did not run the same matrix.** The extrapolation defaults come from the first ' +
+        "run's spec; the measured means pool runs that differ:\n" +
+        combined.specConflicts.map((conflict) => `> - ${conflict}`).join('\n') +
+        '\n\n'
+      : '';
 
-  // --- measured ------------------------------------------------------------
-  lines.push('## 1. Measured — what the source run(s) actually cost');
-  lines.push('');
-  lines.push('| Pass | calls with reported cost | Σ reported | mean per call | calls with NO reported cost |');
-  lines.push('|---|---|---|---|---|');
-  for (const model of Object.keys(combined.observeByModel).sort()) {
-    lines.push(rateRow(combined.observeByModel[model]));
-  }
-  lines.push(rateRow(combined.observeAll));
-  for (const lane of ROUTES) {
-    lines.push(rateRow(combined.executors[lane] ?? emptyRate(`executor: ${lane}`)));
-  }
-  for (const lane of Object.keys(combined.executors).sort()) {
-    if ((ROUTES as readonly string[]).includes(lane)) continue;
-    lines.push(rateRow(combined.executors[lane]));
-  }
-  lines.push(rateRow(combined.judge));
-  lines.push('');
-  lines.push(
-    `Total reported spend across the source run(s): ${usd(combined.totalReportedUsd, 4)} **measured**` +
-      (combined.totalUnreported > 0
-        ? ` — plus **${combined.totalUnreported} call(s) whose cost the provider did not report**. ` +
-          'Those are NOT counted as $0: real spend is at least the number above, possibly more.'
-        : ' — every call reported a cost.'),
-  );
-  lines.push('');
-  if (samples.length > 1) {
-    lines.push('Per source run:');
-    lines.push('');
-    lines.push('| run | reported spend | calls with no reported cost | mock |');
-    lines.push('|---|---|---|---|');
-    for (const sample of samples) {
-      lines.push(
-        `| \`${sample.runId}\` | ${usd(sample.totalReportedUsd, 4)} **measured** | ${sample.totalUnreported} | ` +
-          `${sample.mock ? '**yes — fabricated**' : 'no'} |`,
-      );
-    }
-    lines.push('');
-  }
+  const measuredRows = [
+    ...Object.keys(combined.observeByModel)
+      .sort()
+      .map((model) => rateRow(combined.observeByModel[model])),
+    rateRow(observeAll),
+    ...ROUTES.map((lane) => rateRow(combined.executors[lane] ?? emptyRate(`executor: ${lane}`))),
+    ...Object.keys(combined.executors)
+      .sort()
+      .filter((lane) => !(ROUTES as readonly string[]).includes(lane))
+      .map((lane) => rateRow(combined.executors[lane])),
+    rateRow(combined.judge),
+  ].join('\n');
+  const totalSuffix =
+    combined.totalUnreported > 0
+      ? ` — plus **${combined.totalUnreported} call(s) whose cost the provider did not report**. ` +
+        'Those are NOT counted as $0: real spend is at least the number above, possibly more.'
+      : ' — every call reported a cost.';
+  const perRunBlock =
+    samples.length > 1
+      ? 'Per source run:\n\n| run | reported spend | calls with no reported cost | mock |\n|---|---|---|---|\n' +
+        samples
+          .map(
+            (sample) =>
+              `| \`${sample.runId}\` | ${usd(sample.totalReportedUsd, 4)} **measured** | ${sample.totalUnreported} | ` +
+              `${sample.mock ? '**yes — fabricated**' : 'no'} |`,
+          )
+          .join('\n') +
+        '\n\n'
+      : '';
 
-  // --- extrapolated --------------------------------------------------------
-  lines.push('## 2. Extrapolated — a full run of the benchmark');
-  lines.push('');
-  lines.push('What is actually computed below, per executor route:');
-  lines.push('');
-  lines.push('```');
-  lines.push('observe  = items × Σ(per-model measured observe mean)      [shared by both routes]');
-  lines.push('executor = items × (models + 3 controls) × k × mean cost per fork-run in that lane');
-  lines.push('judge    = items × (models + 3 controls) × k × mean judge cost      [UPPER BOUND]');
-  lines.push('route    = observe + executor + judge');
-  lines.push('```');
-  lines.push('');
-  lines.push(
-    'This is the plan\'s cost formula — `N_models × (obs pass) + (N_models + 3) × k × N_executors × ' +
-      '(executor pass)` — written out per item and per route, with the judge pass (which the plan folds into ' +
-      'the executor pass) priced separately from its own measured rate.',
-  );
-  lines.push('');
-  lines.push(
-    '**The judge term is an upper bound**: the judge is skipped entirely when `check.sh` decided ' +
-      'mechanically and the run produced an empty diff, so a real run makes at most one judge call per ' +
-      'fork-run and usually fewer.',
-  );
-  lines.push('');
-  lines.push(
-    `Target: **${target.models} observer model(s)** (${target.sources.models}) × ` +
-      `**${target.items} corpus item(s)** (${target.sources.items}) × ` +
-      `**k=${target.k}** (${target.sources.k}), plus the ${CONTROL_VARIANT_COUNT} controls ` +
-      '(`none`, `oracle`, `shuffled`) per item.',
-  );
-  lines.push('');
-  lines.push(
-    `Call counts per route: ${routes[0].observeCalls} observe replay(s) (shared by both routes) and ` +
-      `${routes[0].executorRuns} fork-run(s) **per lane**, each with at most one judge call.`,
-  );
-  lines.push('');
-  lines.push('| Component | Route `claude-cli` | Route `openrouter-agent` | basis |');
-  lines.push('|---|---|---|---|');
   const observeBasis =
     `items × Σ per-model measured observe means — ${routes[0].observeMeasuredModels} model(s) at their own rate` +
     (routes[0].observeBlendedModels > 0
-      ? `, ${routes[0].observeBlendedModels} unmeasured model(s) at the blended mean ${usd(combined.observeAll.meanUsd, 6)} **measured**`
+      ? `, ${routes[0].observeBlendedModels} unmeasured model(s) at the blended mean ${usd(observeAll.meanUsd, 6)} **measured**`
       : '');
-  lines.push(
-    `| observe pass (shared) | ${extrapolated(routes[0].observeUsd)} | ${extrapolated(routes[1].observeUsd)} | ${observeBasis} |`,
-  );
-  lines.push(
-    `| executor pass | ${extrapolated(routes[0].executorUsd)} | ${extrapolated(routes[1].executorUsd)} | ` +
-      `items × (models+${CONTROL_VARIANT_COUNT}) × k × mean lane cost ` +
-      `(${usd(combined.executors['claude-cli']?.meanUsd ?? null, 6)} / ${usd(combined.executors['openrouter-agent']?.meanUsd ?? null, 6)} **measured**) |`,
-  );
-  lines.push(
-    `| judge pass (upper bound) | ${extrapolated(routes[0].judgeUsd)} | ${extrapolated(routes[1].judgeUsd)} | ` +
-      `at most one call per fork-run × mean judge cost (${usd(combined.judge.meanUsd, 6)} **measured**) |`,
-  );
-  lines.push(
-    `| **route total** | ${extrapolated(routes[0].totalUsd)} | ${extrapolated(routes[1].totalUsd)} | ` +
-      'observe + executor + judge |',
-  );
-  lines.push('');
   const bothRoutes =
     routes[0].totalUsd !== null && routes[1].totalUsd !== null && routes[0].observeUsd !== null
       ? routes[0].totalUsd + routes[1].totalUsd - routes[0].observeUsd
       : null;
-  lines.push(
-    `Running **both** lanes in one run costs ${extrapolated(bothRoutes)} — the observe pass is paid once and shared, ` +
-      'so it is not double counted.',
-  );
-  lines.push('');
   const missing = [...new Set(routes.flatMap((route) => route.missing))];
-  if (missing.length > 0) {
-    lines.push(
-      `> **Excluded from the totals (no measured rate yet): ${missing.join(', ')}.** ` +
-        'MemBench refuses to price a pass it has not measured — run that pass live first.',
-    );
-    lines.push('');
-  }
-  if (combined.totalUnreported > 0) {
-    lines.push(
-      `> **${combined.totalUnreported} measured call(s) returned no cost.** The means above are computed only over ` +
-        'calls that DID report one, so the extrapolation is a lower bound.',
-    );
-    lines.push('');
-  }
-  lines.push(
-    '_Caveat: extrapolation assumes the measured items are representative. Token-heavy corpus items cost more; ' +
-      'a model that fails and retries costs more. Treat the totals as an order of magnitude, not a quote._',
-  );
-  lines.push('');
-  return lines.join('\n') + '\n';
+  const missingBlock =
+    missing.length > 0
+      ? `> **Excluded from the totals (no measured rate yet): ${missing.join(', ')}.** ` +
+        'MemBench refuses to price a pass it has not measured — run that pass live first.\n\n'
+      : '';
+  const unreportedBlock =
+    combined.totalUnreported > 0
+      ? `> **${combined.totalUnreported} measured call(s) returned no cost.** The means above are computed only over ` +
+        'calls that DID report one, so the extrapolation is a lower bound.\n\n'
+      : '';
+
+  return `# MemBench cost estimate
+
+Source run(s): ${samples.map((sample) => `\`${sample.runId}\``).join(', ')} · generated ${(input.generatedAt ?? new Date()).toISOString()}
+
+${mockBanner}${OPENROUTER_CITATION} ${COST_CITATION_SUFFIX}
+
+${conflictBlock}## 1. Measured — what the source run(s) actually cost
+
+| Pass | calls with reported cost | Σ reported | mean per call | calls with NO reported cost |
+|---|---|---|---|---|
+${measuredRows}
+
+Total reported spend across the source run(s): ${usd(combined.totalReportedUsd, 4)} **measured**${totalSuffix}
+
+${perRunBlock}## 2. Extrapolated — a full run of the benchmark
+
+What is actually computed below, per executor route:
+
+\`\`\`
+observe  = items × Σ(per-model measured observe mean)      [shared by both routes]
+executor = items × (models + 3 controls) × k × mean cost per fork-run in that lane
+judge    = items × (models + 3 controls) × k × mean judge cost      [UPPER BOUND]
+route    = observe + executor + judge
+\`\`\`
+
+This is the plan's cost formula — \`N_models × (obs pass) + (N_models + 3) × k × N_executors × (executor pass)\` — written out per item and per route, with the judge pass (which the plan folds into the executor pass) priced separately from its own measured rate.
+
+**The judge term is an upper bound**: the judge is skipped entirely when \`check.sh\` decided mechanically and the run produced an empty diff, so a real run makes at most one judge call per fork-run and usually fewer.
+
+Target: **${target.models} observer model(s)** (${target.sources.models}) × **${target.items} corpus item(s)** (${target.sources.items}) × **k=${target.k}** (${target.sources.k}), plus the ${CONTROL_VARIANT_COUNT} controls (\`none\`, \`oracle\`, \`shuffled\`) per item.
+
+Call counts per route: ${routes[0].observeCalls} observe replay(s) (shared by both routes) and ${routes[0].executorRuns} fork-run(s) **per lane**, each with at most one judge call.
+
+| Component | Route \`claude-cli\` | Route \`openrouter-agent\` | basis |
+|---|---|---|---|
+| observe pass (shared) | ${extrapolated(routes[0].observeUsd)} | ${extrapolated(routes[1].observeUsd)} | ${observeBasis} |
+| executor pass | ${extrapolated(routes[0].executorUsd)} | ${extrapolated(routes[1].executorUsd)} | items × (models+${CONTROL_VARIANT_COUNT}) × k × mean lane cost (${usd(combined.executors['claude-cli']?.meanUsd ?? null, 6)} / ${usd(combined.executors['openrouter-agent']?.meanUsd ?? null, 6)} **measured**) |
+| judge pass (upper bound) | ${extrapolated(routes[0].judgeUsd)} | ${extrapolated(routes[1].judgeUsd)} | at most one call per fork-run × mean judge cost (${usd(combined.judge.meanUsd, 6)} **measured**) |
+| **route total** | ${extrapolated(routes[0].totalUsd)} | ${extrapolated(routes[1].totalUsd)} | observe + executor + judge |
+
+Running **both** lanes in one run costs ${extrapolated(bothRoutes)} — the observe pass is paid once and shared, so it is not double counted.
+
+${missingBlock}${unreportedBlock}_Caveat: extrapolation assumes the measured items are representative. Token-heavy corpus items cost more; a model that fails and retries costs more. Treat the totals as an order of magnitude, not a quote._
+
+`;
 }
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
-export const COST_HELP = `Usage: membench cost <run-id> [<run-id>...] [options]
+const COST_HELP = `Usage: membench cost <run-id> [<run-id>...] [options]
 
 Sums the REAL reported usage cost of completed run(s) per pass and extrapolates
 to a target matrix with the plan's cost formula. Both executor routes are shown
@@ -579,7 +533,7 @@ interface CostFlags {
   help: boolean;
 }
 
-export function parseCostFlags(args: string[]): CostFlags {
+function parseCostFlags(args: string[]): CostFlags {
   const flags: CostFlags = { runIds: [], help: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -599,10 +553,10 @@ export function parseCostFlags(args: string[]): CostFlags {
       continue;
     }
     if (!['--models', '--items', '--k', '--runs-dir', '--out'].includes(name)) {
-      throw new CostTableError(`unknown option: ${arg}`);
+      throw new Error(`unknown option: ${arg}`);
     }
     const value = inlineValue ?? args[++i];
-    if (value === undefined) throw new CostTableError(`${name} requires a value`);
+    if (value === undefined) throw new Error(`${name} requires a value`);
     if (name === '--runs-dir') {
       flags.runsDir = value;
       continue;
@@ -613,7 +567,7 @@ export function parseCostFlags(args: string[]): CostFlags {
     }
     const parsed = Number.parseInt(value, 10);
     if (!Number.isInteger(parsed) || parsed <= 0) {
-      throw new CostTableError(`${name} must be a positive integer`);
+      throw new Error(`${name} must be a positive integer`);
     }
     if (name === '--models') flags.models = parsed;
     else if (name === '--items') flags.items = parsed;
@@ -667,7 +621,7 @@ export async function costMain(
       const sample = await readRunCostSample(join(runsDir, runId), runId);
       // Guard 1: a run with nothing reported cannot seed a rate, and guessing
       // one is exactly the failure this benchmark exists to avoid.
-      if (sample.totalReportedUsd === 0 && sample.observeAll.calls === 0 && sample.judge.calls === 0 &&
+      if (sample.totalReportedUsd === 0 && observeAllRate(sample).calls === 0 && sample.judge.calls === 0 &&
         Object.values(sample.executors).every((rate) => rate.calls === 0)) {
         console.error(
           `membench cost: run "${runId}" reports no usage cost anywhere (observe, executor or judge) — ` +
