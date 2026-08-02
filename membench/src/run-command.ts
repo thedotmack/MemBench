@@ -31,12 +31,8 @@ import { appendJsonl, readJsonl } from './jsonl.js';
 import type { MockDepsOptions } from './mocks.js';
 import { createMockDeps } from './mocks.js';
 import type { QueryModelFn } from './observe-runner.js';
-import {
-  loadCorpusItems,
-  runObserveStage,
-  type LoadedItem,
-  type ObserveRecord,
-} from './observe-stage.js';
+import { loadCorpusItems, runObserveStage, type LoadedItem } from './observe-stage.js';
+import { readJudgeCosts, readObserveRecords, runIdError } from './scoreboard.js';
 import {
   CONTROL_VARIANTS,
   buildVariantPlans,
@@ -286,24 +282,14 @@ export async function readMeasuredRates(runsDir: string): Promise<MeasuredRates>
     }
     rates.sourceRuns.push(entry.name);
 
-    const obsDir = join(runDir, 'obs');
-    if (existsSync(obsDir)) {
-      for (const itemEntry of readdirSync(obsDir, { withFileTypes: true })) {
-        if (!itemEntry.isDirectory()) continue;
-        const itemDir = join(obsDir, itemEntry.name);
-        for (const file of readdirSync(itemDir)) {
-          if (!file.endsWith('.json')) continue;
-          try {
-            const record = JSON.parse(await Bun.file(join(itemDir, file)).text()) as ObserveRecord;
-            if (record.error) continue;
-            const model = typeof record.model === 'string' ? record.model : file.replace(/\.json$/, '');
-            rates.observeByModel[model] ??= emptyRate();
-            foldRate(rates.observeByModel[model], record.obs_cost_usd);
-          } catch {
-            // Unreadable artifact contributes nothing — never a guessed rate.
-          }
-        }
-      }
+    // Shared readers (scoreboard.ts) — one implementation of "walk obs/ and
+    // judge.jsonl", three accumulators. An unreadable artifact contributes
+    // nothing here; it never becomes a guessed rate.
+    const { records } = await readObserveRecords(runDir, () => {});
+    for (const record of records) {
+      if (record.error) continue;
+      rates.observeByModel[record.model] ??= emptyRate();
+      foldRate(rates.observeByModel[record.model], record.obs_cost_usd);
     }
 
     const resultsPath = join(runDir, 'results.jsonl');
@@ -316,12 +302,7 @@ export async function readMeasuredRates(runsDir: string): Promise<MeasuredRates>
       }
     }
 
-    const judgePath = join(runDir, 'judge.jsonl');
-    if (existsSync(judgePath)) {
-      for (const row of await readJsonl<{ cost_usd?: unknown }>(judgePath)) {
-        foldRate(rates.judge, row.cost_usd);
-      }
-    }
+    for (const cost of await readJudgeCosts(runDir)) foldRate(rates.judge, cost);
   }
   return rates;
 }
@@ -468,22 +449,12 @@ async function loadPriorManifest(path: string): Promise<Partial<ManifestShape> |
  * run's ceiling accounts for what the earlier attempt already spent.
  */
 async function seedTrackerFromRunDir(runDir: string, tracker: SpendTracker): Promise<void> {
-  const obsDir = join(runDir, 'obs');
-  if (existsSync(obsDir)) {
-    for (const itemEntry of readdirSync(obsDir, { withFileTypes: true })) {
-      if (!itemEntry.isDirectory()) continue;
-      const itemDir = join(obsDir, itemEntry.name);
-      for (const file of readdirSync(itemDir)) {
-        if (!file.endsWith('.json')) continue;
-        try {
-          const record = JSON.parse(await Bun.file(join(itemDir, file)).text()) as ObserveRecord;
-          if (record.error) continue;
-          tracker.add('obs', record.obs_cost_usd, `${itemEntry.name}/${file} (prior attempt)`);
-        } catch {
-          // Unreadable artifacts are skipped; the count of knowns stays honest.
-        }
-      }
-    }
+  // Unreadable artifacts are skipped by the shared reader; the count of
+  // knowns stays honest.
+  const { records } = await readObserveRecords(runDir, () => {});
+  for (const record of records) {
+    if (record.error) continue;
+    tracker.add('obs', record.obs_cost_usd, `${record.item_id} × ${record.model} (prior attempt)`);
   }
   const resultsPath = join(runDir, 'results.jsonl');
   if (existsSync(resultsPath)) {
@@ -491,11 +462,8 @@ async function seedTrackerFromRunDir(runDir: string, tracker: SpendTracker): Pro
       tracker.add('executor', row.cost_usd, `${row.item_id} ${row.variant} ${row.executor} (prior attempt)`);
     }
   }
-  const judgePath = join(runDir, 'judge.jsonl');
-  if (existsSync(judgePath)) {
-    for (const row of await readJsonl<{ cost_usd?: number | null; item_id?: string }>(judgePath)) {
-      tracker.add('judge', row.cost_usd ?? null, `${row.item_id ?? '?'} (prior attempt)`);
-    }
+  for (const cost of await readJudgeCosts(runDir)) {
+    tracker.add('judge', cost, 'judge call (prior attempt)');
   }
 }
 
@@ -595,6 +563,12 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
   if (!flags.spec || !flags.runId) {
     console.error('membench run: --spec and --run-id are required\n');
     console.error(RUN_HELP);
+    return 1;
+  }
+  // The run id names a directory under runs/ (and later under published-runs/).
+  const invalidRunId = runIdError(flags.runId);
+  if (invalidRunId) {
+    console.error(`membench run: ${invalidRunId}`);
     return 1;
   }
 

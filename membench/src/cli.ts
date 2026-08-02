@@ -1,14 +1,16 @@
 #!/usr/bin/env bun
 /**
  * membench CLI entry point. Subcommand dispatch + help.
- * Implemented: corpus (Phase 3), run + observe (Phase 6).
- * Pending: score/cost (Phase 7).
+ * corpus (Phase 3), run + observe (Phase 6), score + publish + cost (Phase 7).
  */
 
+import { costMain } from './cost-table.js';
 import { corpusMain } from './corpus.js';
+import { publishMain } from './publish.js';
 import { observeMain, runMain } from './run-command.js';
+import { scoreMain } from './scoreboard.js';
 
-const SUBCOMMANDS = ['run', 'observe', 'corpus', 'score', 'cost'] as const;
+const SUBCOMMANDS = ['run', 'observe', 'corpus', 'score', 'publish', 'cost'] as const;
 
 const HELP = `membench — memory benchmark for claude-mem
 
@@ -18,8 +20,9 @@ Subcommands:
   run      Execute a benchmark run from a TOML run spec (run-specs/*.toml)
   observe  Replay observation generation over corpus items per observer model
   corpus   Build, list, and freeze corpus items
-  score    Score a completed run's results.jsonl into the scoreboard
-  cost     Report real (never estimated) spend for a run
+  score    Score a completed run into summary.json + scoreboard.md
+  publish  Write a redacted, self-checked result bundle to published-runs/
+  cost     Real measured spend + extrapolated cost table (never estimated)
 
 Options:
   -h, --help   Show this help
@@ -34,24 +37,28 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   const subcommand = args[0];
-  if (!(SUBCOMMANDS as readonly string[]).includes(subcommand)) {
-    console.error(`membench: unknown subcommand "${subcommand}"\n`);
-    console.error(HELP);
-    return 1;
-  }
+  const rest = args.slice(1);
 
-  if (subcommand === 'corpus') {
-    return corpusMain(args.slice(1));
+  // Exhaustive over SUBCOMMANDS: an unknown name is the only fall-through, so
+  // adding a subcommand without a handler is a type error, not a stub message.
+  switch (subcommand as (typeof SUBCOMMANDS)[number]) {
+    case 'corpus':
+      return corpusMain(rest);
+    case 'run':
+      return runMain(rest);
+    case 'observe':
+      return observeMain(rest);
+    case 'score':
+      return scoreMain(rest);
+    case 'publish':
+      return publishMain(rest);
+    case 'cost':
+      return costMain(rest);
+    default:
+      console.error(`membench: unknown subcommand "${subcommand}"\n`);
+      console.error(HELP);
+      return 1;
   }
-  if (subcommand === 'run') {
-    return runMain(args.slice(1));
-  }
-  if (subcommand === 'observe') {
-    return observeMain(args.slice(1));
-  }
-
-  console.error(`membench ${subcommand}: not implemented yet`);
-  return 1;
 }
 
 if (import.meta.main) {

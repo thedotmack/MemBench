@@ -1,0 +1,31 @@
+# MemBench v0.1 — live smoke spec (plan "Final Phase", step 4).
+#
+# The smallest run that exercises everything end to end for real:
+# 1 corpus item × 2 cheap observer models (+ the 3 controls) × both executor
+# lanes × k=1 = 10 fork-runs, each with at most one judge call.
+#
+# Run it with a ceiling, always:
+#   bun src/cli.ts run --spec ../run-specs/smoke-1item.toml --run-id smoke-1 --dry-run
+#   bun src/cli.ts run --spec ../run-specs/smoke-1item.toml --run-id smoke-1 --approve-cost-usd 5
+#
+# Model ids come from the plan's observer pool; they are not locked — edit
+# them here (this file is the reviewable record of what a run actually ran).
+
+corpus_items = ["claude-mem-pro-001"]
+observer_models = ["anthropic/claude-haiku-4-5", "xiaomi/mimo-v2-flash:free"]
+executors = ["claude-cli", "openrouter-agent"]
+k = 1
+
+observe_timeout_s = 600
+execute_timeout_s = 1800
+
+judge_model = "anthropic/claude-haiku-4-5"
+executor_model = "anthropic/claude-haiku-4-5"
+
+# Hard co-limit with --approve-cost-usd: whichever is smaller wins.
+max_cost_usd = 5.0
+max_steps = 60
+max_cost_per_run_usd = 0.25
+
+fork_concurrency = 2
+observe_concurrency = 2

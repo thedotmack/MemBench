@@ -7,7 +7,7 @@ describe('cli', () => {
   test('--help prints all subcommands and exits 0', () => {
     const result = Bun.spawnSync(['bun', CLI, '--help']);
     const stdout = result.stdout.toString();
-    for (const subcommand of ['run', 'observe', 'corpus', 'score', 'cost']) {
+    for (const subcommand of ['run', 'observe', 'corpus', 'score', 'publish', 'cost']) {
       expect(stdout).toContain(subcommand);
     }
     expect(result.exitCode).toBe(0);

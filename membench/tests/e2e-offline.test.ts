@@ -16,9 +16,12 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeContentHash } from '../src/corpus.ts';
+import { costMain } from '../src/cost-table.ts';
 import { createPortPool, type PortPool } from '../src/fork.ts';
 import { readJsonl } from '../src/jsonl.ts';
 import type { ObserveRecord } from '../src/observe-stage.ts';
+import { publishMain } from '../src/publish.ts';
+import { scoreMain } from '../src/scoreboard.ts';
 import {
   estimateCost,
   computeCallMatrix,
@@ -707,5 +710,150 @@ describe('membench observe', () => {
     expect(existsSync(join(runDir, 'obs', 'mini-001'))).toBe(true);
     expect(existsSync(join(runDir, 'results.jsonl'))).toBe(false);
     expect(harness.logs.join('\n')).toContain('observe stage complete: 2 (item × model) record(s)');
+  });
+});
+
+/**
+ * Phase 7 end-to-end: the mock run is scored, published and costed with the
+ * same commands a live run uses. The mock's fabricated spend is fine HERE — but
+ * every artifact must keep saying so, so no reviewer can mistake it for data.
+ */
+describe('score / publish / cost on the mock run', () => {
+  test('score renders the scoreboard for both lanes, with no NaN anywhere', async () => {
+    expect(await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-score', '--mock'])).toBe(0);
+    const logs: string[] = [];
+    const code = await scoreMain(['--run-id', 'e2e-score', '--runs-dir', harness.runsDir], {
+      log: (message) => logs.push(message),
+    });
+    expect(code).toBe(0);
+
+    const runDir = harness.runDir('e2e-score');
+    const markdown = readFileSync(join(runDir, 'scoreboard.md'), 'utf-8');
+    expect(markdown).toContain('## Executor lane: `claude-cli`');
+    expect(markdown).toContain('## Executor lane: `openrouter-agent`');
+    expect(markdown).toContain('MOCK RUN');
+    expect(markdown).not.toMatch(/NaN|Infinity/);
+    // Guard 11: neither lane's section names the other lane.
+    const cliStart = markdown.indexOf('## Executor lane: `claude-cli`');
+    const cliEnd = markdown.indexOf('\n## ', cliStart + 1);
+    expect(markdown.slice(cliStart, cliEnd)).not.toContain('openrouter-agent');
+    // Observation counts stay under Diagnostics.
+    const diagnosticsAt = markdown.indexOf('## Diagnostics');
+    expect(markdown.toLowerCase().indexOf('observation')).toBeGreaterThan(diagnosticsAt);
+
+    const summary = JSON.parse(readFileSync(join(runDir, 'summary.json'), 'utf-8')) as {
+      mock: boolean;
+      totals: { rows: number };
+      executors: { executor: string }[];
+    };
+    expect(summary.mock).toBe(true);
+    expect(summary.totals.rows).toBe(20);
+    expect(summary.executors.map((section) => section.executor).sort()).toEqual([
+      'claude-cli',
+      'openrouter-agent',
+    ]);
+  });
+
+  test('score --diff renders run-vs-run deltas', async () => {
+    await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-diff-a', '--mock']);
+    await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-diff-b', '--mock']);
+    await scoreMain(['--run-id', 'e2e-diff-b', '--runs-dir', harness.runsDir], { log: () => {} });
+    const code = await scoreMain(
+      ['--run-id', 'e2e-diff-a', '--runs-dir', harness.runsDir, '--diff', 'e2e-diff-b'],
+      { log: () => {} },
+    );
+    expect(code).toBe(0);
+    const diff = readFileSync(join(harness.runDir('e2e-diff-a'), 'diff-vs-e2e-diff-b.md'), 'utf-8');
+    expect(diff).toContain('# Diff — run `e2e-diff-a` vs `e2e-diff-b`');
+    expect(diff).toContain('## Executor lane: `claude-cli`');
+    expect(diff).not.toMatch(/NaN|Infinity/);
+  });
+
+  test('publish writes a redacted bundle that carries mock:true through', async () => {
+    await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-pub', '--mock']);
+    const publishedDir = tempDir('published');
+    const logs: string[] = [];
+    const code = await publishMain(
+      ['--run-id', 'e2e-pub', '--runs-dir', harness.runsDir, '--published-dir', publishedDir],
+      { log: (message) => logs.push(message) },
+    );
+    expect(code).toBe(0);
+
+    const bundleDir = join(publishedDir, 'e2e-pub');
+    expect(existsSync(join(bundleDir, 'results.jsonl'))).toBe(true);
+    expect(existsSync(join(bundleDir, 'summary.json'))).toBe(true);
+    expect(existsSync(join(bundleDir, 'scoreboard.md'))).toBe(true);
+    expect(existsSync(join(bundleDir, 'run-spec.toml'))).toBe(true);
+    expect(existsSync(join(bundleDir, 'corpus-hashes.json'))).toBe(true);
+    // Redacted OUT: raw audit material never leaves runs/.
+    expect(existsSync(join(bundleDir, 'forks'))).toBe(false);
+    expect(existsSync(join(bundleDir, 'obs'))).toBe(false);
+    expect(existsSync(join(bundleDir, 'judge.jsonl'))).toBe(false);
+    expect(existsSync(join(bundleDir, 'manifest.json'))).toBe(false);
+
+    // A reviewer can see this is mock data from the bundle alone.
+    const meta = JSON.parse(readFileSync(join(bundleDir, 'run-meta.json'), 'utf-8')) as Record<string, unknown>;
+    expect(meta.mock).toBe(true);
+    expect(meta.spec_path).toBeUndefined();
+    expect(JSON.stringify(meta)).not.toContain('/Users/');
+    expect(readFileSync(join(bundleDir, 'summary.json'), 'utf-8')).toContain('"mock": true');
+    expect(readFileSync(join(bundleDir, 'scoreboard.md'), 'utf-8')).toContain('MOCK RUN');
+    expect(readFileSync(join(bundleDir, 'README.md'), 'utf-8')).toContain('MOCK RUN');
+    expect(logs.join('\n')).toContain('MOCK run');
+    expect(logs.join('\n')).toContain('REMINDER');
+
+    // Re-publishing the same run id refuses rather than clobbering.
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.map(String).join(' '));
+    try {
+      expect(
+        await publishMain(
+          ['--run-id', 'e2e-pub', '--runs-dir', harness.runsDir, '--published-dir', publishedDir],
+          { log: () => {} },
+        ),
+      ).toBe(1);
+    } finally {
+      console.error = originalError;
+    }
+    expect(errors.join('\n')).toContain('already exists');
+  });
+
+  test('cost names the source run id and labels the mock spend as fabricated', async () => {
+    await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-cost', '--mock']);
+    const logs: string[] = [];
+    const code = await costMain(['e2e-cost', '--runs-dir', harness.runsDir], {
+      log: (message) => logs.push(message),
+    });
+    expect(code).toBe(0);
+    const markdown = logs.join('\n');
+    expect(markdown).toContain('Source run(s): `e2e-cost`');
+    expect(markdown).toContain('MOCK DATA');
+    expect(markdown).toContain('Route `claude-cli`');
+    expect(markdown).toContain('Route `openrouter-agent`');
+    expect(markdown).toContain('**measured**');
+    expect(markdown).toContain('**extrapolated**');
+    expect(markdown).not.toMatch(/NaN|Infinity/);
+  });
+});
+
+/**
+ * The committed mini-corpus is FROZEN (its provenance hash matches its bytes),
+ * which is what makes the README quickstart runnable straight from a clone:
+ *   bun src/cli.ts run --mock --spec tests/fixtures/e2e-spec.toml \
+ *     --run-id demo --corpus-dir tests/fixtures/mini-corpus
+ * Editing a fixture file without re-freezing breaks that command — this test
+ * fails first, with the reason.
+ */
+describe('committed mini-corpus fixture', () => {
+  test('is frozen: provenance.content_hash matches the files on disk', async () => {
+    for (const itemId of ['mini-001', 'mini-002']) {
+      const dir = join(MINI_CORPUS, itemId);
+      const provenance = JSON.parse(readFileSync(join(dir, 'provenance.json'), 'utf-8')) as {
+        content_hash?: string;
+      };
+      expect(provenance.content_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(await computeContentHash(dir)).toBe(provenance.content_hash);
+    }
   });
 });

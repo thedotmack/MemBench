@@ -27,6 +27,38 @@ That's it. Better memory = fewer tokens, more successes.
 
 ---
 
+## Quickstart ⚡
+
+Everything runs on [Bun](https://bun.sh) plus `git` (the offline mocks shell out
+to `git init` / `add` / `commit` so a fork's `git diff` behaves exactly as it
+does live). No API key, no network, no claude-mem install, no `claude` binary:
+
+```bash
+cd membench
+bun install
+bun test                                    # the full offline suite
+
+# the whole loop, mocked end to end (writes runs/demo/)
+bun src/cli.ts run --mock \
+  --spec tests/fixtures/e2e-spec.toml \
+  --run-id demo \
+  --corpus-dir tests/fixtures/mini-corpus
+
+bun src/cli.ts score --run-id demo          # → runs/demo/scoreboard.md + summary.json
+bun src/cli.ts cost demo                    # → the cost table (mock spend, clearly labeled)
+```
+
+`--mock` swaps the provider, both executors, the claude-mem worker and the repo
+clone for offline stand-ins, so the run exercises the real orchestration code
+with fabricated numbers. Every artifact a mock run produces says `mock: true`
+and carries a "do not cite" banner — mock spend must never be mistaken for a
+measurement.
+
+Subcommands: `run` · `observe` · `corpus` · `score` · `publish` · `cost`
+(`bun src/cli.ts --help`).
+
+---
+
 ## The questions we're answering ❓
 
 | # | Question | How we answer it |
@@ -57,6 +89,236 @@ Everything else (obs count, XML parsing, tags) = diagnostics. Not the story.
 
 ---
 
+## Scoreboard metrics 📊
+
+`bun src/cli.ts score --run-id <id>` reads `runs/<id>/` and writes
+`summary.json` (every number, machine-readable) and `scoreboard.md` (the
+rendering). Each metric is defined exactly once, in `membench/src/scoreboard.ts`,
+with its formula in a comment:
+
+| Metric | Formula | Notes |
+|---|---|---|
+| **success rate** | `successes / runs` | Every row in the cell counts, including rows that errored — a crashed run is not a success. Read against the `none` floor. |
+| **tokens-to-done** | mean ± sample stddev (n−1) of `tokens_total` | **Successful runs only**, and only those whose provider reported usage. A successful run with no reported usage is counted and shown separately, never averaged in as 0. |
+| **% of oracle savings** | `(floor_mean − model_mean) / (floor_mean − oracle_mean)` | How much of the hand-written ceiling's saving this model captured. Renders `n/a (floor==oracle)` / `n/a (no floor tokens)` / … instead of a NaN. Values below 0% or above 100% are reported as-is. |
+| **real cost** | Σ reported `cost_usd` (exec side) and Σ reported `obs_cost_usd` (observe side) | Never estimated. Rows whose cost the provider did not report are counted and printed, so a sum always reads as a lower bound. |
+| **search burden** | mean `mem_search_calls` over completed runs | An aborted run never got the chance to search; counting its 0 would fake a low burden. |
+| **drift rate** | `drifted / judged` over rows with `judged == true` | A row the judge never decided is UNJUDGED and shown as its own count — never counted as "no drift". |
+
+Two structural rules hold in every scoreboard:
+
+- **Lanes never mix.** The markdown is sectioned by executor and no cell
+  combines `claude-cli` and `openrouter-agent` rows. Cross-executor deltas
+  appear only under Diagnostics and in the cost table.
+- **Counts are diagnostics.** Observation counts, observe tokens, parse notes
+  and accommodations live under `## Diagnostics`, never in the headline tables.
+  Count ≠ value.
+
+`score --diff <other-run-id>` renders metric deltas per (executor, variant)
+against another run.
+
+---
+
+## Corpus format 📦
+
+Each frozen item is a directory under `corpus/<item-id>/` with **7 content
+files** plus its provenance:
+
+| file | what it is |
+|---|---|
+| `transcript.jsonl` | the sanitized session-N transcript |
+| `toolcalls.jsonl` | `(tool_name, tool_input, tool_output, created_at_epoch, cwd)` records replayed to the observer models |
+| `repo.lock` | `{url, commit, branch, cwd_at_recording}` — the exact repo state the task starts from |
+| `task.md` | the hindsight task: session N+1's opening human prompt, edited only to remove machine-specific context |
+| `check.sh` | mechanical pass/fail, run from the fork's repo root. Exit `0` = pass, exit `3` = "defer to the judge with `success.md`", anything else = fail. **Written before any model runs.** |
+| `success.md` | the judge rubric, for the cases mechanical checking can't decide |
+| `oracle.md` | hand-written perfect notes — the ceiling control's memory |
+| `provenance.json` | session ids, project slug, dates, sanitizer version, **content hash** |
+| `sanitization-report.md` | build artifact: every redaction the sanitizer made, for hand review (excluded from the content hash) |
+
+**Freezing.** `bun src/cli.ts corpus freeze <item-dir>` hashes the sorted file list
+(sha256 over `path\0bytes\0`, excluding `provenance.json` and the sanitization
+report) and records it as `content_hash`. Every run re-computes the hash and
+**refuses to start if an item changed since it was frozen** — a published number
+always names the exact bytes it measured. The corpus is append-only: fix an item
+by adding a new one.
+
+`bun src/cli.ts corpus list` prints the item table (7 required files + frozen
+status); `corpus candidates` and `corpus build` mine new items from the local
+claude-mem DB and transcripts (read-only, sanitized, with a per-item
+sanitization report for hand review).
+
+Tasks come from what the user actually did next. They are never "improved"
+beyond de-machining, and `check.sh` is written before any model sees the item
+(no post-hoc fitting).
+
+---
+
+## The two executors 🏎️
+
+Both are first-class in v0.1 and implement the same `Executor` interface, so
+they share the fork, measurement and scoring pipeline.
+
+**`claude-cli`** runs the production consumer: `claude --print --output-format
+json --permission-mode bypassPermissions` with an isolated `HOME` per fork, a
+`--mcp-config` pointing the `mcp-search` MCP server at that fork's own
+claude-mem worker, and the injection block prepended to `task.md`. No `--bare`
+(it would disable plugin/skill discovery). `mem_search_calls` is counted from
+`mcp__mcp-search__*` tool-use blocks in the session transcript, and the fork's
+`git diff` is saved for the judge.
+
+**`openrouter-agent`** is a minimal coding agent on the exact-pinned
+`@openrouter/agent` SDK: `bash` / `read_file` / `write_file` / `edit_file` tools
+locked to the fork's repo (path escapes rejected), plus `search` / `timeline` /
+`get_observations` tools that call the fork worker's HTTP routes — the same
+routes the production MCP server proxies. Any OpenRouter model can execute, which
+is what makes an executor-side model matrix possible, and every step's real
+`usage.cost` is captured. Stop conditions are `stepCountIs(max_steps)` and
+`maxCost(max_cost_per_run_usd)`.
+
+**Lane separation is a rule, not a preference.** The two executors differ in
+tooling and pricing, so a number from one lane is not comparable to a number
+from the other. No scoreboard cell mixes them; cross-lane figures live only in
+Diagnostics and in the cost table.
+
+---
+
+## Run governance 🚦
+
+Ported from the conventions OpenRouter's own team publishes benchmarks with
+(`OpenRouterTeam/search-benchmarks`):
+
+```bash
+# 1. reviewable spec, committed to the repo
+cat run-specs/smoke-1item.toml
+
+# 2. dry run: validates the spec + corpus, prints the planned call matrix and a
+#    cost estimate built ONLY from measured rates in prior runs. Zero network.
+bun src/cli.ts run --spec ../run-specs/smoke-1item.toml --run-id smoke-1 --dry-run
+
+# 3. live runs REQUIRE an explicit ceiling
+bun src/cli.ts run --spec ../run-specs/smoke-1item.toml --run-id smoke-1 --approve-cost-usd 5
+
+# 4. a stopped or partial run resumes without re-spending
+bun src/cli.ts run --spec ../run-specs/smoke-1item.toml --run-id smoke-1 --resume
+```
+
+- **`--dry-run`** makes no network calls and writes nothing. Its estimate is
+  built from real costs measured in earlier runs; mock runs are excluded from
+  the rates, and a component with no measured rate is listed as excluded rather
+  than guessed.
+- **`--approve-cost-usd <ceiling>`** is mandatory for live runs. The effective
+  ceiling is `min(flag, spec.max_cost_usd)`. The runner refuses to start when the
+  measured-rate estimate exceeds it, and stops between items when cumulative
+  **real reported** spend crosses it. Calls that report no cost are counted as
+  UNKNOWN and surfaced — never assumed free — and a run where nothing has
+  reported a cost stops on its own after `--max-unreported-calls`.
+- **`--resume`** skips `(item, variant, executor, run_index)` cells already in
+  `results.jsonl`, reuses non-errored observe records, and refuses to resume
+  into a run with a different spec, corpus hash or mock flag.
+  `--retry-failed` re-queues errored cells (their old rows move to
+  `retried-rows.jsonl`, never discarded).
+- Every fork-run writes a row, even on timeout or crash. Rows are appended
+  immediately, never batched.
+- Every fork gets its own `CLAUDE_MEM_DATA_DIR`, its own worker port and its own
+  `HOME`. Nothing ever points at your real `~/.claude-mem`.
+
+`OPENROUTER_API_KEY`, `CLAUDE_MEM_ROOT` and `MEMBENCH_RUNS_DIR` are env-only —
+they are secrets or machine-local paths and are rejected if put in a spec.
+
+---
+
+## Publishing results 📤
+
+```bash
+bun src/cli.ts publish --run-id smoke-1     # → published-runs/smoke-1/
+```
+
+The bundle is **redacted**: `results.jsonl`, `summary.json`, `scoreboard.md`,
+the run spec, the corpus hashes and a README. No transcripts, no diffs, no fork
+trees, no judge replies — those stay in the gitignored `runs/` tree for audit.
+Machine-local paths are stripped from the manifest.
+
+Before writing, the bundle is **self-checked** for `/Users/` paths, key-shaped
+tokens (`sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `Bearer …`, JWTs, PEM blocks)
+and third-party email addresses. Any hit deletes the bundle and refuses to
+publish, naming the file and line (with the secret masked). `publish` also
+refuses to overwrite an existing bundle.
+
+A bundle is committed **only after a human reads it end to end**.
+
+---
+
+## Cost table 💸
+
+```bash
+bun src/cli.ts cost smoke-1 [more-run-ids...] [--models 6 --items 5 --k 3]
+```
+
+Sums the **real reported** `usage.cost` per pass (observe pass per model,
+executor pass per lane, judge pass), then extrapolates — the plan's formula
+`N_models × (obs pass) + (N_models + 3) × k × N_executors × (executor pass)`,
+written out per item and per route:
+
+```
+observe  = items × Σ(per-model measured observe mean)      [shared by both routes]
+executor = items × (models + 3 controls) × k × mean cost per fork-run in that lane
+judge    = items × (models + 3 controls) × k × mean judge cost      [UPPER BOUND]
+```
+
+Observe cost is priced **per model** (a cheap model must never be priced at an
+expensive model's rate); only models the source runs never measured fall back to
+the blended mean, and the table says how many did. The judge term is an upper
+bound because the judge is skipped when `check.sh` decided mechanically and the
+diff was empty.
+
+Both executor routes are shown side by side, every number is labeled
+**measured** or **extrapolated**, and calls whose cost was not reported are
+counted in their own column. Defaults for the target matrix come from the run's
+own spec; when several source runs disagree about the matrix they ran, the table
+says so instead of silently picking one.
+
+**There is no pricing table anywhere in MemBench.** A pass with no measured rate
+is excluded from the total and named; a run that reported no cost at all is
+refused, not estimated.
+
+---
+
+## Reproduce from a clean clone 🔁
+
+```bash
+git clone <this repo> mb-verify
+cd mb-verify/membench
+bun install            # one runtime dep: the exact-pinned @openrouter/agent (+ zod peer)
+bun test               # full offline suite — no network, no API key
+bun src/cli.ts run --mock --spec tests/fixtures/e2e-spec.toml \
+  --run-id verify --corpus-dir tests/fixtures/mini-corpus
+bun src/cli.ts score --run-id verify
+```
+
+That proves the harness runs with nothing but Bun and git. A live run
+additionally needs `OPENROUTER_API_KEY`, a claude-mem checkout
+(`CLAUDE_MEM_ROOT`) for the per-fork workers, and — for the `claude-cli` lane —
+the Claude Code CLI on `PATH`. Live runs are local-machine only: remote
+sandboxes block `openrouter.ai`.
+
+Every published number is reproducible from this repo: the corpus is
+content-hashed and frozen, the spec is committed, `results.jsonl` carries one
+row per fork-run, and the observation prompt, parser and mode config are
+vendored verbatim from claude-mem (with provenance headers) rather than
+reimplemented.
+
+### Repo layout
+
+- `corpus/` — the frozen items (see [Corpus format](#corpus-format-))
+- `membench/` — the harness (`src/`, `tests/`)
+- `run-specs/` — the reviewable TOML spec of every run we publish
+- `runs/` — raw run artifacts: transcripts, diffs, fork trees (gitignored)
+- `published-runs/` — redacted, self-checked, hand-reviewed result bundles
+- `plans/2026-07-31-membench-v0.1-plan.md` — the normative build plan
+
+---
+
 ## What we ship
 
 - 📦 `corpus/` — transcripts + tasks + pass/fail checks (frozen, versioned)
@@ -82,6 +344,11 @@ Everything else (obs count, XML parsing, tags) = diagnostics. Not the story.
 - OpenRouter gets cited in everything published
 - All models run through OpenRouter
 
+**Where the citation lands:** every scoreboard, every cost table and every
+bundle under `published-runs/` carries the OpenRouter credit, and every cost
+figure in this repo is a reported `usage.cost` value — never a rate-table
+estimate. `bun src/cli.ts cost <run-id>` is the deliverable itself.
+
 ---
 
 ## Do next ▶️
@@ -99,3 +366,5 @@ Everything else (obs count, XML parsing, tags) = diagnostics. Not the story.
 - k≥3 runs per fork (executors are random-ish)
 - Count ≠ value. Never headline count.
 - Full details: `plans/2026-07-29-membench-openrouter-kickoff.md`
+- Never estimate a cost, never split tokens 70/30 — report `null` and say so
+  (the harness enforces this: unreported cost stays `null` and is surfaced)
