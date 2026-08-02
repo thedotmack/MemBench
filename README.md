@@ -168,10 +168,13 @@ claude-mem worker, and the injection block prepended to `task.md`. No `--bare`
 `git diff` is saved for the judge.
 
 **`openrouter-agent`** is a minimal coding agent on the exact-pinned
-`@openrouter/agent` SDK: `bash` / `read_file` / `write_file` / `edit_file` tools
-locked to the fork's repo (path escapes rejected), plus `search` / `timeline` /
-`get_observations` tools that call the fork worker's HTTP routes — the same
-routes the production MCP server proxies. Any OpenRouter model can execute, which
+`@openrouter/agent` SDK: `bash` / `read_file` / `write_file` / `edit_file`
+coding tools plus `search` / `timeline` / `get_observations` tools that call
+the fork worker's HTTP routes — the same routes the production MCP server
+proxies. The file tools resolve every path inside the fork's repo (traversal,
+absolute-path and symlink escapes rejected) so every edit lands in the captured
+diff; `bash` is cwd-locked to the repo with a fork-scoped `HOME` and an
+allowlisted env, but it is **not** an OS sandbox — see the trust model below. Any OpenRouter model can execute, which
 is what makes an executor-side model matrix possible, and every step's real
 `usage.cost` is captured. Stop conditions are `stepCountIs(max_steps)` and
 `maxCost(max_cost_per_run_usd)`.
@@ -180,6 +183,17 @@ is what makes an executor-side model matrix possible, and every step's real
 tooling and pricing, so a number from one lane is not comparable to a number
 from the other. No scoreboard cell mixes them; cross-lane figures live only in
 Diagnostics and in the cost table.
+
+**Trust model (v0.1).** MemBench is a local research harness: the corpus
+items, models and run specs are all authored or chosen by the person running
+it, on their own machine. Fork isolation (own repo checkout, worker, data dir,
+`HOME`) exists for benchmark validity — no cross-fork contamination, honest
+diffs — not as a security boundary against a hostile model. In particular the
+executor `bash` tool runs on the host unsandboxed (cwd-locked only): a
+malicious or confused model could read or write outside its fork. Don't point
+the harness at tasks or models you wouldn't run on your own machine. OS-level
+sandboxing of the bash tool is scheduled for v0.2 (see
+`plans/2026-08-02-membench-v0.2-experiment-redesign.md`).
 
 ---
 
