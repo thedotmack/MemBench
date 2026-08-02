@@ -43,17 +43,10 @@ export function appendJsonl(path: string, row: unknown): Promise<void> {
  */
 export async function readJsonl<T = unknown>(path: string): Promise<T[]> {
   const rows: T[] = [];
-  const file = Bun.file(path);
   let text: string;
   try {
-    if (!(await file.exists())) {
-      console.warn(`warning: jsonl file not found: ${path}`);
-      return rows;
-    }
-    text = await file.text();
+    text = await Bun.file(path).text();
   } catch (error: unknown) {
-    // exists() then text() is racy (TOCTOU): a file deleted in between — or
-    // unreadable outright — routes to the same warn-and-return-[] path.
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`warning: jsonl file not found or unreadable: ${path}: ${message}`);
     return rows;

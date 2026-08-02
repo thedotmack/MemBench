@@ -17,7 +17,7 @@
 
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { killWorkerTree } from '../fork.js';
 import type { ForkContext } from '../types.js';
 
@@ -28,7 +28,7 @@ import type { ForkContext } from '../types.js';
  * prefix (locale vars). fork.ts's buildWorkerEnv builds on the same baseline
  * via allowlistedParentEnv().
  */
-export const PARENT_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+const PARENT_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
   'PATH',
   'TMPDIR',
   'TEMP',
@@ -86,11 +86,6 @@ export interface RunWithTimeoutOptions {
   timeoutMs: number;
   /** SIGTERM → SIGKILL grace window. Default 3000ms. */
   gracefulKillMs?: number;
-  /**
-   * After exit/kill, how long to wait for the stdio pipes to close before
-   * proceeding with the output collected so far. Default 2000ms.
-   */
-  streamCloseGraceMs?: number;
 }
 
 export interface RunWithTimeoutResult {
@@ -123,11 +118,11 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
  * then a group SIGKILL for stragglers.
  *
  * Output is accumulated from data events and the post-exit pipe wait is
- * BOUNDED (streamCloseGraceMs), so even a survivor holding a pipe open can
- * never wedge the caller (row invariant, guard 3).
+ * BOUNDED (2s), so even a survivor holding a pipe open can never wedge the
+ * caller (row invariant, guard 3).
  */
 export async function runWithTimeout(argv: string[], options: RunWithTimeoutOptions): Promise<RunWithTimeoutResult> {
-  const { cwd, env, timeoutMs, gracefulKillMs = 3_000, streamCloseGraceMs = 2_000 } = options;
+  const { cwd, env, timeoutMs, gracefulKillMs = 3_000 } = options;
   const child = spawn(argv[0], argv.slice(1), {
     cwd,
     env,
@@ -181,7 +176,7 @@ export async function runWithTimeout(argv: string[], options: RunWithTimeoutOpti
   await Promise.race([
     closed,
     new Promise<void>((resolveDrain) => {
-      drainTimer = setTimeout(resolveDrain, streamCloseGraceMs);
+      drainTimer = setTimeout(resolveDrain, 2_000);
     }),
   ]);
   clearTimeout(drainTimer);
@@ -207,13 +202,11 @@ export function capText(text: string, capBytes = 50_000): string {
 
 /** JSON-encode a value for a transcript row, capped so audit logs stay bounded. */
 export function capJson(value: unknown, capBytes = 50_000): string {
-  let encoded: string;
   try {
-    encoded = JSON.stringify(value) ?? 'null';
+    return capText(JSON.stringify(value) ?? String(value), capBytes);
   } catch {
-    encoded = String(value);
+    return capText(String(value), capBytes);
   }
-  return capText(encoded, capBytes);
 }
 
 export interface DiffCaptureResult {
@@ -263,4 +256,30 @@ export function captureGitDiff(repoDir: string, diffPath: string, baseSha?: stri
 /** Uniform error → message helper for record.error fields. */
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Set record.error only when unset — the FIRST failure wins (guard 3). */
+export function fail(record: { error?: string }, message: string): void {
+  if (!record.error) record.error = message;
+}
+
+/**
+ * Shared executor epilogue: capture the fork's git diff to
+ * <forkDir>/executor.diff and note failure on the record without ever
+ * throwing (row invariant, guard 3).
+ */
+export function captureDiffInto(
+  record: { diff_path: string; error?: string },
+  repoDir: string,
+  forkDir: string,
+  baseSha?: string,
+): void {
+  try {
+    const diffPath = join(forkDir, 'executor.diff');
+    const diff = captureGitDiff(repoDir, diffPath, baseSha);
+    record.diff_path = diffPath;
+    if (!diff.ok) fail(record, diff.error ?? 'diff capture failed');
+  } catch (error: unknown) {
+    fail(record, `diff capture failed: ${errorMessage(error)}`);
+  }
 }

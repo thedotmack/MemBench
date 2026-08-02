@@ -20,7 +20,7 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { captureGitDiff, forkRootDir } from './executors/shared.js';
+import { captureDiffInto, forkRootDir } from './executors/shared.js';
 import type { CloneRepoFn, SpawnWorkerFn, WorkerHandle } from './fork.js';
 import { JUDGE_PROMPT_MARKER } from './measure.js';
 import type { QueryModelFn } from './observe-runner.js';
@@ -66,15 +66,8 @@ export const MOCK_OBSERVATION_JSON = JSON.stringify({
 });
 
 export interface MockQueryOptions {
-  /** Reported input tokens per call (omit to report none). */
-  tokensIn?: number | null;
-  tokensOut?: number | null;
   /** Reported cost per call (null → "provider reported no cost"). */
   costUsd?: number | null;
-  /** Judge verdict for drift. */
-  drift?: boolean;
-  /** Judge verdict for success on judge-gated items. */
-  judgeSuccess?: boolean;
   /**
    * Models whose XML replies are unparseable prose, so observe-runner's
    * >50% parse-fail rule triggers the JSON accommodation; the JSON-mode pass
@@ -92,16 +85,7 @@ export interface MockQueryOptions {
  * calls with a canned JSON verdict (keyed on measure.ts's prompt marker).
  */
 export function createMockQueryModel(options: MockQueryOptions = {}): QueryModelFn {
-  const {
-    tokensIn = 900,
-    tokensOut = 120,
-    costUsd = 0.0004,
-    drift = false,
-    judgeSuccess = true,
-    jsonAccommodationModels = [],
-    judgeFails,
-    calls,
-  } = options;
+  const { costUsd = 0.0004, jsonAccommodationModels = [], judgeFails, calls } = options;
 
   return async (model, messages, opts) => {
     const last = messages[messages.length - 1];
@@ -109,16 +93,16 @@ export function createMockQueryModel(options: MockQueryOptions = {}): QueryModel
     calls?.push({ model, prompt });
 
     const usage = {
-      ...(tokensIn !== null ? { inputTokens: tokensIn } : {}),
-      ...(tokensOut !== null ? { outputTokens: tokensOut } : {}),
+      inputTokens: 900,
+      outputTokens: 120,
       ...(costUsd !== null ? { costUsd } : {}),
       servedModel: model,
     };
 
     if (prompt.includes(JUDGE_PROMPT_MARKER)) {
       if (judgeFails) throw new Error(judgeFails);
-      const verdict: Record<string, unknown> = { drift, note: 'mock judge verdict' };
-      if (prompt.includes('SUCCESS RUBRIC')) verdict.success = judgeSuccess;
+      const verdict: Record<string, unknown> = { drift: false, note: 'mock judge verdict' };
+      if (prompt.includes('SUCCESS RUBRIC')) verdict.success = true;
       return { content: JSON.stringify(verdict), ...usage };
     }
 
@@ -144,15 +128,12 @@ export function createMockQueryModel(options: MockQueryOptions = {}): QueryModel
 interface MockWorkerState {
   /** Bun.serve handle; only stop() is used, so the concrete generic is irrelevant. */
   server: { stop(closeActiveConnections?: boolean): void };
-  imports: unknown[];
   markExited: () => void;
 }
 
 export interface MockWorkerFarm {
   spawnWorker: SpawnWorkerFn;
   killTree: (worker: WorkerHandle) => Promise<void>;
-  /** Import bodies received, per port — for assertions. */
-  importsByPort: Map<number, unknown[]>;
   /** Stop every still-running stub (test teardown safety net). */
   stopAll(): void;
 }
@@ -186,7 +167,6 @@ function renderInjection(imports: unknown[]): string {
  */
 export function createMockWorkerFarm(): MockWorkerFarm {
   const byPid = new Map<number, MockWorkerState>();
-  const importsByPort = new Map<number, unknown[]>();
   let nextPid = 900_000;
 
   const spawnWorker: SpawnWorkerFn = ({ env }) => {
@@ -195,7 +175,6 @@ export function createMockWorkerFarm(): MockWorkerFarm {
       throw new Error('mock worker: CLAUDE_MEM_WORKER_PORT missing from the spawn env');
     }
     const imports: unknown[] = [];
-    importsByPort.set(port, imports);
     const server = Bun.serve({
       port,
       hostname: '127.0.0.1',
@@ -240,7 +219,7 @@ export function createMockWorkerFarm(): MockWorkerFarm {
     const exited = new Promise<void>((resolveExited) => {
       markExited = () => resolveExited();
     });
-    byPid.set(pid, { server, imports, markExited });
+    byPid.set(pid, { server, markExited });
     return {
       pid,
       kill: () => {
@@ -263,7 +242,6 @@ export function createMockWorkerFarm(): MockWorkerFarm {
     killTree: async (worker) => {
       stop(worker.pid);
     },
-    importsByPort,
     stopAll: () => {
       for (const pid of [...byPid.keys()]) stop(pid);
     },
@@ -314,10 +292,8 @@ export interface MockExecutorOptions {
    * file written, `error` set on the record → error row).
    */
   failFor?: (context: { fork: ForkContext; prompt: string; callIndex: number }) => string | undefined;
-  tokensIn?: number | null;
-  tokensOut?: number | null;
+  /** Reported cost per run (null → "provider reported no cost"). */
   costUsd?: number | null;
-  memSearchCalls?: number;
   /** Records every execute() call for assertions. */
   calls?: { lane: ExecutorName; variant: string; item: string; prompt: string }[];
 }
@@ -329,15 +305,7 @@ export interface MockExecutorOptions {
  * including on an injected failure (guard 3).
  */
 export function createMockExecutor(options: MockExecutorOptions): Executor {
-  const {
-    lane,
-    failFor,
-    tokensIn = 4_200,
-    tokensOut = 800,
-    costUsd = 0.011,
-    memSearchCalls = 2,
-    calls,
-  } = options;
+  const { lane, failFor, costUsd = 0.011, calls } = options;
   let callIndex = 0;
 
   return {
@@ -376,16 +344,15 @@ export function createMockExecutor(options: MockExecutorOptions): Executor {
             `# mock run\n\nlane: ${lane}\nvariant: ${fork.variant}\nitem: ${fork.item.id}\n`,
           );
           record.output = `mock ${lane} run complete for ${fork.item.id} (${fork.variant})`;
-          record.mem_search_calls = memSearchCalls;
-          if (tokensIn !== null) record.tokens_in = tokensIn;
-          if (tokensOut !== null) record.tokens_out = tokensOut;
+          record.mem_search_calls = 2;
+          record.tokens_in = 4_200;
+          record.tokens_out = 800;
           if (costUsd !== null) record.cost_usd = costUsd;
         }
       } catch (error: unknown) {
         record.error = error instanceof Error ? error.message : String(error);
       } finally {
-        const diff = captureGitDiff(fork.repoDir, diffPath);
-        if (!diff.ok && !record.error) record.error = diff.error ?? 'diff capture failed';
+        captureDiffInto(record, fork.repoDir, forkDir);
       }
       return record;
     },

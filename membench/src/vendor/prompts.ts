@@ -1,11 +1,12 @@
 // Vendored from claude-mem src/sdk/prompts.ts
-// Commit: 132b46343 — byte-identical except this 3-line header and the import shims on the first two lines
+// Commit: 132b46343 — TRIMMED vendored copy: the summary-mode surface
+// (SUMMARY_MODE_MARKER, SDKSession, buildSummaryPrompt,
+// buildContinuationPrompt) is removed as unused by MemBench; the import shims
+// replace claude-mem's internals; the remaining code is otherwise unmodified.
 // Vendored: 2026-08-01 for MemBench
 
 import { logger } from './shims/logger.js';
 import type { ModeConfig } from './shims/types.js';
-
-export const SUMMARY_MODE_MARKER = 'MODE SWITCH: PROGRESS SUMMARY';
 
 export interface Observation {
   id: number;
@@ -14,14 +15,6 @@ export interface Observation {
   tool_output: string;
   created_at_epoch: number;
   cwd?: string;
-}
-
-export interface SDKSession {
-  id: number;
-  memory_session_id: string | null;
-  project: string;
-  user_prompt: string;
-  last_assistant_message?: string;
 }
 
 function observationSkeleton(mode: ModeConfig): string {
@@ -155,63 +148,4 @@ If a <parameters> or <outcome> block above contains an "<elided chars=... />" ma
 Return either one or more <observation>...</observation> blocks, or an empty response if this tool use should be skipped.
 Concrete debugging findings from logs, queue state, database rows, session routing, or code-path inspection count as durable discoveries and should be recorded.
 Never reply with prose such as "Skipping", "No substantive tool executions", or any explanation outside XML. Non-XML text is discarded.`;
-}
-
-export function buildSummaryPrompt(session: SDKSession, mode: ModeConfig): string {
-  const lastAssistantMessage = session.last_assistant_message || (() => {
-    logger.error('SDK', 'Missing last_assistant_message in session for summary prompt', {
-      sessionId: session.id
-    });
-    return '';
-  })();
-
-  return `--- ${SUMMARY_MODE_MARKER} ---
-⚠️ CRITICAL TAG REQUIREMENT — READ CAREFULLY:
-• You MUST wrap your ENTIRE response in <summary>...</summary> tags.
-• Do NOT use <observation> tags. <observation> output will be DISCARDED and cause a system error.
-• The ONLY accepted root tag is <summary>. Any other root tag is a protocol violation.
-
-${mode.prompts.header_summary_checkpoint}
-${mode.prompts.summary_instruction}
-
-${mode.prompts.summary_context_label}
-${lastAssistantMessage}
-
-${mode.prompts.summary_format_instruction}
-<summary>
-  <request>${mode.prompts.xml_summary_request_placeholder}</request>
-  <investigated>${mode.prompts.xml_summary_investigated_placeholder}</investigated>
-  <learned>${mode.prompts.xml_summary_learned_placeholder}</learned>
-  <completed>${mode.prompts.xml_summary_completed_placeholder}</completed>
-  <next_steps>${mode.prompts.xml_summary_next_steps_placeholder}</next_steps>
-  <notes>${mode.prompts.xml_summary_notes_placeholder}</notes>
-</summary>
-
-REMINDER: Your response MUST use <summary> as the root tag, NOT <observation>.
-${mode.prompts.summary_footer}`;
-}
-
-export function buildContinuationPrompt(userPrompt: string, promptNumber: number, contentSessionId: string, mode: ModeConfig): string {
-  return `${mode.prompts.continuation_greeting}
-
-<observed_from_primary_session>
-  <user_request>${userPrompt}</user_request>
-  <requested_at>${new Date().toISOString().split('T')[0]}</requested_at>
-</observed_from_primary_session>
-
-${mode.prompts.system_identity}
-
-${mode.prompts.observer_role}
-
-${mode.prompts.spatial_awareness}
-
-${mode.prompts.recording_focus}
-
-${mode.prompts.skip_guidance}
-
-${mode.prompts.continuation_instruction}
-
-${observationSkeleton(mode)}
-
-${mode.prompts.header_memory_continued}`;
 }

@@ -114,6 +114,27 @@ function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
+const isNonEmptyStringArray = (value: unknown) => isStringArray(value) && value.length > 0;
+const isNonEmptyString = (value: unknown) => typeof value === 'string' && value.trim() !== '';
+
+/** Per-key [predicate, error message] — applied to every declared key. */
+const RULES: Record<keyof RunSpec, [(value: unknown) => boolean, string]> = {
+  corpus_items: [isNonEmptyStringArray, 'corpus_items must be a non-empty array of strings'],
+  observer_models: [isStringArray, 'observer_models must be an array of strings'],
+  executors: [isNonEmptyStringArray, 'executors must be a non-empty array of strings'],
+  k: [isPositiveInteger, 'k must be a positive integer'],
+  observe_timeout_s: [isPositiveNumber, 'observe_timeout_s must be a positive number'],
+  execute_timeout_s: [isPositiveNumber, 'execute_timeout_s must be a positive number'],
+  judge_model: [isNonEmptyString, 'judge_model must be a non-empty string'],
+  max_cost_usd: [isPositiveNumber, 'max_cost_usd must be a positive number'],
+  max_steps: [isPositiveInteger, 'max_steps must be a positive integer'],
+  max_cost_per_run_usd: [isPositiveNumber, 'max_cost_per_run_usd must be a positive number'],
+  executor_model: [isNonEmptyString, 'executor_model must be a non-empty string when present'],
+  cli_model: [isNonEmptyString, 'cli_model must be a non-empty string when present'],
+  fork_concurrency: [isPositiveInteger, 'fork_concurrency must be a positive integer when present'],
+  observe_concurrency: [isPositiveInteger, 'observe_concurrency must be a positive integer when present'],
+};
+
 /**
  * Validate a parsed TOML table as a RunSpec. Rejects unknown keys, missing
  * keys, and type/value violations. `source` names the spec in error messages.
@@ -135,26 +156,18 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
     throw new SpecError(`${source}: missing required key(s): ${missingKeys.join(', ')}`);
   }
 
-  const {
-    corpus_items,
-    observer_models,
-    executors,
-    k,
-    observe_timeout_s,
-    execute_timeout_s,
-    judge_model,
-    max_cost_usd,
-    max_steps,
-    max_cost_per_run_usd,
-    executor_model,
-    cli_model,
-    fork_concurrency,
-    observe_concurrency,
-  } = table;
-
-  if (!isStringArray(corpus_items) || corpus_items.length === 0) {
-    throw new SpecError(`${source}: corpus_items must be a non-empty array of strings`);
+  // Type/value checks from the table; absent OPTIONAL_KEYS stay absent.
+  const spec: Record<string, unknown> = {};
+  for (const key of [...KNOWN_KEYS, ...OPTIONAL_KEYS]) {
+    const value = table[key];
+    if (value === undefined) continue;
+    const [accepts, message] = RULES[key];
+    if (!accepts(value)) throw new SpecError(`${source}: ${message}`);
+    spec[key] = value;
   }
+
+  // Cross-value checks the per-key predicates cannot express.
+  const corpus_items = spec.corpus_items as string[];
   if (new Set(corpus_items).size !== corpus_items.length) {
     throw new SpecError(`${source}: corpus_items contains duplicate entries`);
   }
@@ -165,12 +178,7 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
         `([A-Za-z0-9._-], starting alphanumeric); got: ${unsafeIds.map((id) => JSON.stringify(id)).join(', ')}`,
     );
   }
-  if (!isStringArray(observer_models)) {
-    throw new SpecError(`${source}: observer_models must be an array of strings`);
-  }
-  if (!isStringArray(executors) || executors.length === 0) {
-    throw new SpecError(`${source}: executors must be a non-empty array of strings`);
-  }
+  const executors = spec.executors as string[];
   const badExecutors = executors.filter((name) => !EXECUTOR_NAMES.includes(name));
   if (badExecutors.length > 0) {
     throw new SpecError(
@@ -180,57 +188,8 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
   if (new Set(executors).size !== executors.length) {
     throw new SpecError(`${source}: executors contains duplicate entries`);
   }
-  if (!isPositiveInteger(k)) {
-    throw new SpecError(`${source}: k must be a positive integer`);
-  }
-  if (!isPositiveNumber(observe_timeout_s)) {
-    throw new SpecError(`${source}: observe_timeout_s must be a positive number`);
-  }
-  if (!isPositiveNumber(execute_timeout_s)) {
-    throw new SpecError(`${source}: execute_timeout_s must be a positive number`);
-  }
-  if (typeof judge_model !== 'string' || judge_model.trim() === '') {
-    throw new SpecError(`${source}: judge_model must be a non-empty string`);
-  }
-  if (!isPositiveNumber(max_cost_usd)) {
-    throw new SpecError(`${source}: max_cost_usd must be a positive number`);
-  }
-  if (!isPositiveInteger(max_steps)) {
-    throw new SpecError(`${source}: max_steps must be a positive integer`);
-  }
-  if (!isPositiveNumber(max_cost_per_run_usd)) {
-    throw new SpecError(`${source}: max_cost_per_run_usd must be a positive number`);
-  }
-  if (executor_model !== undefined && (typeof executor_model !== 'string' || executor_model.trim() === '')) {
-    throw new SpecError(`${source}: executor_model must be a non-empty string when present`);
-  }
-  if (cli_model !== undefined && (typeof cli_model !== 'string' || cli_model.trim() === '')) {
-    throw new SpecError(`${source}: cli_model must be a non-empty string when present`);
-  }
-  if (fork_concurrency !== undefined && !isPositiveInteger(fork_concurrency)) {
-    throw new SpecError(`${source}: fork_concurrency must be a positive integer when present`);
-  }
-  if (observe_concurrency !== undefined && !isPositiveInteger(observe_concurrency)) {
-    throw new SpecError(`${source}: observe_concurrency must be a positive integer when present`);
-  }
 
-  return {
-    corpus_items,
-    observer_models,
-    executors: executors as ExecutorName[],
-    k,
-    observe_timeout_s,
-    execute_timeout_s,
-    judge_model,
-    max_cost_usd,
-    max_steps,
-    max_cost_per_run_usd,
-    // Spread-when-present: an absent optional key stays absent on the object.
-    ...(executor_model !== undefined ? { executor_model } : {}),
-    ...(cli_model !== undefined ? { cli_model } : {}),
-    ...(fork_concurrency !== undefined ? { fork_concurrency } : {}),
-    ...(observe_concurrency !== undefined ? { observe_concurrency } : {}),
-  };
+  return spec as unknown as RunSpec;
 }
 
 /**

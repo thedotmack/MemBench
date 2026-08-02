@@ -10,8 +10,6 @@ import { publishMain } from './publish.js';
 import { observeMain, runMain } from './run-command.js';
 import { scoreMain } from './scoreboard.js';
 
-const SUBCOMMANDS = ['run', 'observe', 'corpus', 'score', 'publish', 'cost'] as const;
-
 const HELP = `membench — memory benchmark for claude-mem
 
 Usage: membench <subcommand> [options]
@@ -39,9 +37,7 @@ export async function main(argv: string[]): Promise<number> {
   const subcommand = args[0];
   const rest = args.slice(1);
 
-  // Exhaustive over SUBCOMMANDS: an unknown name is the only fall-through, so
-  // adding a subcommand without a handler is a type error, not a stub message.
-  switch (subcommand as (typeof SUBCOMMANDS)[number]) {
+  switch (subcommand) {
     case 'corpus':
       return corpusMain(rest);
     case 'run':

@@ -1,8 +1,8 @@
 /**
  * Retry helper — ported from claude-mem src/services/worker/retry.ts
- * @ 132b46343 (core: lines 76-125). Behavior preserved verbatim:
+ * @ 132b46343 (core: lines 76-125). Behavior preserved:
  *   - maxRetries 2 default (POSTs aren't strictly idempotent)
- *   - per-attempt timeout 30s via AbortController
+ *   - per-attempt timeout 30s (AbortSignal.timeout, external aborts fanned in)
  *   - backoff 100 * 2^attempt + random(50), capped at 30s
  *   - retries ONLY kinds 'transient' | 'rate_limit'
  *   - honors retryAfterMs (Retry-After header) for rate_limit errors
@@ -10,6 +10,7 @@
  * (MemBench has no structured logger; message content preserved).
  */
 
+import { setTimeout as sleep } from 'node:timers/promises';
 import { isClassified } from './provider-errors.js';
 
 /**
@@ -37,8 +38,6 @@ export interface RetryOptions {
   perAttemptTimeoutMs?: number;
   /** Base delay used for exponential backoff. Default 100ms. */
   baseDelayMs?: number;
-  /** Cap for backoff delay. Default 30s. */
-  maxDelayMs?: number;
   /** Tag for logging. */
   label?: string;
   /** External abort signal. */
@@ -49,7 +48,6 @@ const DEFAULT_OPTIONS: Required<Omit<RetryOptions, 'label' | 'abortSignal'>> = {
   maxRetries: 2,
   perAttemptTimeoutMs: 30_000,
   baseDelayMs: 100,
-  maxDelayMs: 30_000,
 };
 
 /** Returns true if a classified error is worth retrying. */
@@ -78,29 +76,22 @@ export async function withRetry<T>(
   options: RetryOptions = {},
 ): Promise<T> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
-  let lastError: unknown;
 
-  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     if (options.abortSignal?.aborted) {
       throw new Error('Aborted');
     }
 
-    // Per-attempt timeout via AbortController. Forward external aborts too.
-    const attemptController = new AbortController();
-    const timeoutHandle = setTimeout(() => attemptController.abort(), opts.perAttemptTimeoutMs);
-    const onExternalAbort = () => attemptController.abort();
-    options.abortSignal?.addEventListener('abort', onExternalAbort, { once: true });
+    // Per-attempt timeout; an external abort aborts the attempt too.
+    const timeoutSignal = AbortSignal.timeout(opts.perAttemptTimeoutMs);
+    const attemptSignal = options.abortSignal
+      ? AbortSignal.any([options.abortSignal, timeoutSignal])
+      : timeoutSignal;
 
     try {
-      return await fn(attemptController.signal);
+      return await fn(attemptSignal);
     } catch (err: unknown) {
-      lastError = err;
-
-      if (!isRetryableKind(err)) {
-        throw err;
-      }
-
-      if (attempt === opts.maxRetries) {
+      if (!isRetryableKind(err) || attempt >= opts.maxRetries) {
         throw err;
       }
 
@@ -109,7 +100,7 @@ export async function withRetry<T>(
       if (isClassified(err) && err.kind === 'rate_limit' && err.retryAfterMs !== undefined) {
         delayMs = err.retryAfterMs;
       } else {
-        delayMs = computeBackoffMs(attempt, { baseDelayMs: opts.baseDelayMs, maxDelayMs: opts.maxDelayMs });
+        delayMs = computeBackoffMs(attempt, { baseDelayMs: opts.baseDelayMs, maxDelayMs: 30_000 });
       }
 
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -117,32 +108,13 @@ export async function withRetry<T>(
         kind: isClassified(err) ? err.kind : 'unclassified',
         message: errMsg.substring(0, 200),
       });
-      // Abort-aware sleep: an external abort during backoff should exit
-      // immediately instead of waiting out the full delay.
-      await new Promise<void>((resolve, reject) => {
-        const signal = options.abortSignal;
-        if (signal?.aborted) {
-          reject(new Error('Aborted'));
-          return;
-        }
-        const timer = setTimeout(() => {
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-        }, delayMs);
-        const onAbort = () => {
-          clearTimeout(timer);
-          reject(new Error('Aborted'));
-        };
-        signal?.addEventListener('abort', onAbort, { once: true });
-      });
-    } finally {
-      clearTimeout(timeoutHandle);
-      options.abortSignal?.removeEventListener('abort', onExternalAbort);
+      // Abort-aware sleep: an external abort during backoff exits immediately
+      // instead of waiting out the full delay.
+      try {
+        await sleep(delayMs, undefined, { signal: options.abortSignal });
+      } catch {
+        throw new Error('Aborted');
+      }
     }
   }
-
-  // Reachable only if opts.maxRetries < 0 (loop never executed). The success
-  // and exhaustion paths both return/throw inside the loop. This guards
-  // pathological inputs and satisfies TypeScript's return-type exhaustiveness.
-  throw lastError ?? new Error('withRetry exited without an attempt (maxRetries < 0)');
 }

@@ -39,7 +39,6 @@ describe('vendored parseAgentXml', () => {
     expect(parsed.valid).toBe(true);
     if (!parsed.valid) return;
     expect(parsed.observations).toHaveLength(2);
-    expect(parsed.summary).toBeNull();
 
     const [a, b] = parsed.observations;
     expect(a.type).toBe('discovery');
@@ -75,22 +74,6 @@ Let me know if you want more detail on the append path.`;
     expect(parsed.observations[0].title).toBe('Locked JSONL appends');
   });
 
-  test('<skip_summary/> yields a valid skipped summary (reason captured when present)', () => {
-    const bare = parseAgentXml('<skip_summary/>', 'parser-test');
-    expect(bare.valid).toBe(true);
-    if (bare.valid) {
-      expect(bare.observations).toEqual([]);
-      expect(bare.summary?.skipped).toBe(true);
-      expect(bare.summary?.skip_reason).toBeNull();
-    }
-
-    const reasoned = parseAgentXml('<skip_summary reason="trivial session"/>', 'parser-test');
-    expect(reasoned.valid).toBe(true);
-    if (reasoned.valid) {
-      expect(reasoned.summary?.skip_reason).toBe('trivial session');
-    }
-  });
-
   test('plain prose is {valid:false}', () => {
     expect(parseAgentXml('Skipping — no substantive tool executions.', 'parser-test')).toEqual({ valid: false });
     expect(parseAgentXml('', 'parser-test')).toEqual({ valid: false });
@@ -116,20 +99,5 @@ Let me know if you want more detail on the append path.`;
   <facts></facts>
 </observation>`, 'parser-test');
     expect(parsed).toEqual({ valid: false });
-  });
-
-  test('summary block parses; a tagless summary is rejected as a false positive', () => {
-    const parsed = parseAgentXml(`<summary>
-  <request>Fix the flaky test</request>
-  <learned>The race was in the append path</learned>
-</summary>`, 'parser-test');
-    expect(parsed.valid).toBe(true);
-    if (parsed.valid) {
-      expect(parsed.summary?.request).toBe('Fix the flaky test');
-      expect(parsed.summary?.learned).toBe('The race was in the append path');
-      expect(parsed.observations).toEqual([]);
-    }
-
-    expect(parseAgentXml('<summary>just prose, no sub-tags</summary>', 'parser-test')).toEqual({ valid: false });
   });
 });

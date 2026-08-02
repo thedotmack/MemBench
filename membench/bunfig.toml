@@ -1,0 +1,5 @@
+# Scope test discovery to the harness's own suite. Without this, `bun test`
+# also crawls the untracked runs/<id>/forks/**/repo checkouts (cloned repos
+# with their own failing test suites).
+[test]
+root = "tests"
