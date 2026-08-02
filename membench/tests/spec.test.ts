@@ -109,6 +109,24 @@ describe('validateRunSpec value validation', () => {
     ).toThrow('corpus_items contains duplicate entries');
   });
 
+  test('rejects corpus_items that are not single safe path segments', () => {
+    // Ids become directory segments under the corpus root and runs/<id>/obs/;
+    // traversal or separator ids would read/write outside those roots.
+    for (const bad of ['../../victim', 'a/b', 'a\\b', '/etc/passwd', '..', '.', '.hidden', '']) {
+      expect(() => validateRunSpec({ ...baseSpec(), corpus_items: [bad] }, 'spec')).toThrow(
+        'corpus_items entries must be single path segments',
+      );
+    }
+  });
+
+  test('accepts ordinary corpus item ids', () => {
+    const spec = validateRunSpec(
+      { ...baseSpec(), corpus_items: ['claude-mem-pro-004', 'item_2.v1'] },
+      'spec',
+    );
+    expect(spec.corpus_items).toEqual(['claude-mem-pro-004', 'item_2.v1']);
+  });
+
   test('rejects duplicate executors', () => {
     expect(() =>
       validateRunSpec({ ...baseSpec(), executors: ['claude-cli', 'claude-cli'] }, 'spec'),

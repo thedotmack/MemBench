@@ -14,6 +14,20 @@ import type { ExecutorName } from './types.js';
 
 export class SpecError extends Error {}
 
+/**
+ * A corpus item id is used verbatim as a directory segment under both the
+ * corpus root (reads) and runs/<run_id>/obs/ (writes), so it must be exactly
+ * one safe path segment — no separators, no traversal, no leading dot. A
+ * traversal id like `../../victim` would read outside --corpus-dir and land
+ * observation artifacts in a sibling run's directory.
+ */
+const SAFE_ITEM_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** True when `id` is a single safe directory segment (see SAFE_ITEM_ID_RE). */
+export function isSafeCorpusItemId(id: string): boolean {
+  return SAFE_ITEM_ID_RE.test(id);
+}
+
 /** The reviewable parameters of a benchmark run. Flat table, snake_case keys. */
 export interface RunSpec {
   /** Frozen corpus item ids to run. */
@@ -143,6 +157,13 @@ export function validateRunSpec(raw: unknown, source: string): RunSpec {
   }
   if (new Set(corpus_items).size !== corpus_items.length) {
     throw new SpecError(`${source}: corpus_items contains duplicate entries`);
+  }
+  const unsafeIds = corpus_items.filter((id) => !isSafeCorpusItemId(id));
+  if (unsafeIds.length > 0) {
+    throw new SpecError(
+      `${source}: corpus_items entries must be single path segments ` +
+        `([A-Za-z0-9._-], starting alphanumeric); got: ${unsafeIds.map((id) => JSON.stringify(id)).join(', ')}`,
+    );
   }
   if (!isStringArray(observer_models)) {
     throw new SpecError(`${source}: observer_models must be an array of strings`);

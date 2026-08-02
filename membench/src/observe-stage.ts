@@ -31,6 +31,7 @@ import {
 } from './corpus.js';
 import { readJsonl } from './jsonl.js';
 import { runObserveItem, type ObserveToolCall, type QueryModelFn } from './observe-runner.js';
+import { isSafeCorpusItemId } from './spec.js';
 import type { CorpusItem } from './types.js';
 import codeMode from './vendor/modes/code.json';
 import type { ParsedObservation } from './vendor/parser.js';
@@ -117,6 +118,14 @@ export async function loadCorpusItem(
   itemId: string,
   options: { requireFrozen?: boolean } = {},
 ): Promise<LoadedItem> {
+  // Defense in depth behind validateRunSpec: the id becomes a directory
+  // segment here (reads) and in observeRecordPath (writes), so every load
+  // path — spec items and shuffled donors alike — re-checks it.
+  if (!isSafeCorpusItemId(itemId)) {
+    throw new ObserveStageError(
+      `corpus item id ${JSON.stringify(itemId)} is not a single safe path segment`,
+    );
+  }
   const dir = resolve(corpusDir, itemId);
   if (!existsSync(dir)) {
     throw new ObserveStageError(`corpus item not found: ${itemId} (${dir})`);
