@@ -20,6 +20,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import { loadConfig } from './config.js';
 import {
   OPENROUTER_CITATION,
@@ -534,46 +535,34 @@ interface CostFlags {
 }
 
 function parseCostFlags(args: string[]): CostFlags {
-  const flags: CostFlags = { runIds: [], help: false };
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (!arg.startsWith('-')) {
-      flags.runIds.push(arg);
-      continue;
-    }
-    let name = arg;
-    let inlineValue: string | undefined;
-    const eq = arg.indexOf('=');
-    if (arg.startsWith('--') && eq !== -1) {
-      name = arg.slice(0, eq);
-      inlineValue = arg.slice(eq + 1);
-    }
-    if (name === '--help' || name === '-h') {
-      flags.help = true;
-      continue;
-    }
-    if (!['--models', '--items', '--k', '--runs-dir', '--out'].includes(name)) {
-      throw new Error(`unknown option: ${arg}`);
-    }
-    const value = inlineValue ?? args[++i];
-    if (value === undefined) throw new Error(`${name} requires a value`);
-    if (name === '--runs-dir') {
-      flags.runsDir = value;
-      continue;
-    }
-    if (name === '--out') {
-      flags.out = value;
-      continue;
-    }
-    const parsed = Number.parseInt(value, 10);
-    if (!Number.isInteger(parsed) || parsed <= 0) {
-      throw new Error(`${name} must be a positive integer`);
-    }
-    if (name === '--models') flags.models = parsed;
-    else if (name === '--items') flags.items = parsed;
-    else flags.k = parsed;
-  }
-  return flags;
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      models: { type: 'string' },
+      items: { type: 'string' },
+      k: { type: 'string' },
+      'runs-dir': { type: 'string' },
+      out: { type: 'string' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    strict: true,
+    allowPositionals: true,
+  });
+  const positiveInt = (name: string, raw: string | undefined): number | undefined => {
+    if (raw === undefined) return undefined;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`--${name} must be a positive integer`);
+    return parsed;
+  };
+  return {
+    runIds: positionals,
+    models: positiveInt('models', values.models),
+    items: positiveInt('items', values.items),
+    k: positiveInt('k', values.k),
+    runsDir: values['runs-dir'],
+    out: values.out,
+    help: values.help ?? false,
+  };
 }
 
 /** `membench cost`. Returns a process exit code; never throws for user errors. */

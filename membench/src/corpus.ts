@@ -20,6 +20,7 @@ import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import {
   HASH_EXCLUDED,
   REQUIRED_FILES,
@@ -760,27 +761,28 @@ Actions:
 
 interface ParsedFlags {
   positional: string[];
-  flags: Record<string, string>;
+  flags: Record<string, string | undefined>;
 }
 
 function parseFlags(args: string[]): ParsedFlags {
-  const positional: string[] = [];
-  const flags: Record<string, string> = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg.startsWith('--')) {
-      const name = arg.slice(2);
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith('--')) {
-        throw new CorpusBuildError(`flag --${name} requires a value`);
-      }
-      flags[name] = value;
-      i++;
-    } else {
-      positional.push(arg);
-    }
+  try {
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        db: { type: 'string' },
+        'projects-dir': { type: 'string' },
+        project: { type: 'string' },
+        limit: { type: 'string' },
+        out: { type: 'string' },
+        'corpus-dir': { type: 'string' },
+      },
+      strict: true,
+      allowPositionals: true,
+    });
+    return { positional: positionals, flags: values };
+  } catch (error: unknown) {
+    throw new CorpusBuildError(error instanceof Error ? error.message : String(error));
   }
-  return { positional, flags };
 }
 
 function shortDate(iso: string | null): string {

@@ -27,6 +27,7 @@
 
 import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import { loadConfig } from './config.js';
 import { EMAIL_ALLOWLIST } from './sanitize.js';
 import {
@@ -367,31 +368,23 @@ interface PublishFlags {
   help: boolean;
 }
 
-export function parsePublishFlags(args: string[]): PublishFlags {
-  const flags: PublishFlags = { help: false };
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let name = arg;
-    let inlineValue: string | undefined;
-    const eq = arg.indexOf('=');
-    if (arg.startsWith('--') && eq !== -1) {
-      name = arg.slice(0, eq);
-      inlineValue = arg.slice(eq + 1);
-    }
-    if (name === '--help' || name === '-h') {
-      flags.help = true;
-      continue;
-    }
-    if (name !== '--run-id' && name !== '--runs-dir' && name !== '--published-dir') {
-      throw new PublishError(`unknown option: ${arg}`);
-    }
-    const value = inlineValue ?? args[++i];
-    if (value === undefined) throw new PublishError(`${name} requires a value`);
-    if (name === '--run-id') flags.runId = value;
-    else if (name === '--runs-dir') flags.runsDir = value;
-    else flags.publishedDir = value;
-  }
-  return flags;
+function parsePublishFlags(args: string[]): PublishFlags {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'run-id': { type: 'string' },
+      'runs-dir': { type: 'string' },
+      'published-dir': { type: 'string' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    strict: true,
+  });
+  return {
+    runId: values['run-id'],
+    runsDir: values['runs-dir'],
+    publishedDir: values['published-dir'],
+    help: values.help ?? false,
+  };
 }
 
 /** `membench publish`. Returns a process exit code; never throws for user errors. */

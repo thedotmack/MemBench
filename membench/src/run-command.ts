@@ -24,6 +24,7 @@
 
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import { loadConfig } from './config.js';
 import { defaultCorpusDir, listItems } from './corpus-item.js';
 import { emptyRate, estimateUsd, merge, readRunCostSample, type PassRate } from './cost-table.js';
@@ -109,104 +110,67 @@ interface RunFlags {
   observeConcurrency?: number;
 }
 
-const VALUE_FLAGS = new Set([
-  '--spec',
-  '--run-id',
-  '--approve-cost-usd',
-  '--max-unreported-calls',
-  '--corpus-dir',
-  '--runs-dir',
-  '--claude-mem-root',
-  '--fork-concurrency',
-  '--observe-concurrency',
-]);
-const BOOLEAN_FLAGS = new Set([
-  '--dry-run',
-  '--resume',
-  '--retry-failed',
-  '--mock',
-  '--observe-only',
-  '--help',
-  '-h',
-]);
-
 function parseRunFlags(args: string[]): RunFlags & { help: boolean } {
-  const flags: RunFlags & { help: boolean } = {
-    dryRun: false,
-    resume: false,
-    retryFailed: false,
-    mock: false,
-    observeOnly: false,
-    help: false,
-  };
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let name = arg;
-    let inlineValue: string | undefined;
-    const eq = arg.indexOf('=');
-    if (arg.startsWith('--') && eq !== -1) {
-      name = arg.slice(0, eq);
-      inlineValue = arg.slice(eq + 1);
-    }
-    if (BOOLEAN_FLAGS.has(name)) {
-      if (name === '--dry-run') flags.dryRun = true;
-      else if (name === '--resume') flags.resume = true;
-      else if (name === '--retry-failed') flags.retryFailed = true;
-      else if (name === '--mock') flags.mock = true;
-      else if (name === '--observe-only') flags.observeOnly = true;
-      else flags.help = true;
-      continue;
-    }
-    if (!VALUE_FLAGS.has(name)) {
-      throw new Error(`unknown option: ${arg}`);
-    }
-    const value = inlineValue ?? args[++i];
-    if (value === undefined) throw new Error(`${name} requires a value`);
-    switch (name) {
-      case '--spec':
-        flags.spec = value;
-        break;
-      case '--run-id':
-        flags.runId = value;
-        break;
-      case '--approve-cost-usd': {
-        const parsed = Number.parseFloat(value);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-          throw new Error('--approve-cost-usd must be a positive number');
-        }
-        flags.approveCostUsd = parsed;
-        break;
-      }
-      case '--max-unreported-calls': {
-        const parsed = Number.parseInt(value, 10);
-        if (!Number.isInteger(parsed) || parsed < 0) {
-          throw new Error('--max-unreported-calls must be a non-negative integer');
-        }
-        flags.maxUnreportedCalls = parsed;
-        break;
-      }
-      case '--corpus-dir':
-        flags.corpusDir = value;
-        break;
-      case '--runs-dir':
-        flags.runsDir = value;
-        break;
-      case '--claude-mem-root':
-        flags.claudeMemRoot = value;
-        break;
-      case '--fork-concurrency':
-      case '--observe-concurrency': {
-        const parsed = Number.parseInt(value, 10);
-        if (!Number.isInteger(parsed) || parsed <= 0) {
-          throw new Error(`${name} must be a positive integer`);
-        }
-        if (name === '--fork-concurrency') flags.forkConcurrency = parsed;
-        else flags.observeConcurrency = parsed;
-        break;
-      }
+  const { values } = parseArgs({
+    args,
+    options: {
+      spec: { type: 'string' },
+      'run-id': { type: 'string' },
+      'approve-cost-usd': { type: 'string' },
+      'max-unreported-calls': { type: 'string' },
+      'corpus-dir': { type: 'string' },
+      'runs-dir': { type: 'string' },
+      'claude-mem-root': { type: 'string' },
+      'fork-concurrency': { type: 'string' },
+      'observe-concurrency': { type: 'string' },
+      'dry-run': { type: 'boolean' },
+      resume: { type: 'boolean' },
+      'retry-failed': { type: 'boolean' },
+      mock: { type: 'boolean' },
+      'observe-only': { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    strict: true,
+  });
+
+  let approveCostUsd: number | undefined;
+  if (values['approve-cost-usd'] !== undefined) {
+    approveCostUsd = Number.parseFloat(values['approve-cost-usd']);
+    if (!Number.isFinite(approveCostUsd) || approveCostUsd <= 0) {
+      throw new Error('--approve-cost-usd must be a positive number');
     }
   }
-  return flags;
+  let maxUnreportedCalls: number | undefined;
+  if (values['max-unreported-calls'] !== undefined) {
+    maxUnreportedCalls = Number.parseInt(values['max-unreported-calls'], 10);
+    if (!Number.isInteger(maxUnreportedCalls) || maxUnreportedCalls < 0) {
+      throw new Error('--max-unreported-calls must be a non-negative integer');
+    }
+  }
+  const positiveInt = (name: string, raw: string | undefined): number | undefined => {
+    if (raw === undefined) return undefined;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`--${name} must be a positive integer`);
+    return parsed;
+  };
+
+  return {
+    spec: values.spec,
+    runId: values['run-id'],
+    dryRun: values['dry-run'] ?? false,
+    resume: values.resume ?? false,
+    retryFailed: values['retry-failed'] ?? false,
+    mock: values.mock ?? false,
+    observeOnly: values['observe-only'] ?? false,
+    help: values.help ?? false,
+    approveCostUsd,
+    maxUnreportedCalls,
+    corpusDir: values['corpus-dir'],
+    runsDir: values['runs-dir'],
+    claudeMemRoot: values['claude-mem-root'],
+    forkConcurrency: positiveInt('fork-concurrency', values['fork-concurrency']),
+    observeConcurrency: positiveInt('observe-concurrency', values['observe-concurrency']),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +351,7 @@ export interface RunOverrides {
   log?: (message: string) => void;
 }
 
-interface ManifestShape {
+export interface ManifestShape {
   run_id: string;
   created_at: string;
   mock: boolean;
