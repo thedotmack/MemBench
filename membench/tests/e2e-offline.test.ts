@@ -15,9 +15,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computeContentHash } from '../src/corpus.ts';
+import { computeContentHash } from '../src/corpus-item.ts';
 import { costMain } from '../src/cost-table.ts';
-import { createPortPool, type PortPool } from '../src/fork.ts';
 import { readJsonl } from '../src/jsonl.ts';
 import type { ObserveRecord } from '../src/observe-stage.ts';
 import { publishMain } from '../src/publish.ts';
@@ -25,7 +24,6 @@ import { scoreMain } from '../src/scoreboard.ts';
 import {
   estimateCost,
   computeCallMatrix,
-  observeMain,
   readMeasuredRates,
   runMain,
   type RunOverrides,
@@ -127,7 +125,7 @@ beforeEach(async () => {
     errors,
     prompts,
     run: (args, overrides) => runMain([...args, ...baseArgs], withDefaults(overrides)),
-    observe: (args, overrides) => observeMain([...args, ...baseArgs], withDefaults(overrides)),
+    observe: (args, overrides) => runMain([...args, ...baseArgs, '--observe-only'], withDefaults(overrides)),
     runDir: (runId: string) => join(runsDir, runId),
     rows: (runId: string) => readJsonl<ResultRow>(join(runsDir, runId, 'results.jsonl')),
   };
@@ -332,27 +330,6 @@ describe('mock end-to-end run', () => {
     expect(record.obs_cost_usd).toBeNull();
   });
 
-  test('the JSON accommodation surfaces on the obs record AND every row of that variant', async () => {
-    const code = await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-accom', '--mock'], {
-      mock: { query: { jsonAccommodationModels: ['mock/observer-b'] } },
-    });
-    expect(code).toBe(0);
-
-    const record = JSON.parse(
-      readFileSync(join(harness.runDir('e2e-accom'), 'obs', 'mini-001', 'mock-observer-b-2a31c6bb.json'), 'utf-8'),
-    ) as ObserveRecord;
-    expect(record.accommodation).toBe('json');
-    expect(record.observations.length).toBeGreaterThan(0);
-    expect(record.parse_notes.join(' ')).toContain('JSON accommodation');
-
-    const rows = await harness.rows('e2e-accom');
-    const accommodated = rows.filter((row) => row.variant === 'model:mock/observer-b');
-    expect(accommodated).toHaveLength(4);
-    expect(accommodated.every((row) => row.accommodation === 'json')).toBe(true);
-    // Only that model's rows are tagged — the others competed on XML.
-    expect(rows.filter((row) => row.accommodation !== undefined)).toHaveLength(4);
-  });
-
   test('a judge transport failure lands a row with judged:false, drift null and success false', async () => {
     const code = await harness.run(
       ['--spec', SPEC_TWO_ITEMS, '--run-id', 'e2e-judgefail', '--mock'],
@@ -425,12 +402,22 @@ describe('governance', () => {
         obs_cost_usd: 0.02,
       }),
     );
+    const liveRow = (executor: string, runIndex: number, costUsd: number | null) =>
+      JSON.stringify({
+        run_id: 'prior-live',
+        item_id: 'mini-001',
+        variant: 'none',
+        executor,
+        run_index: runIndex,
+        success: true,
+        cost_usd: costUsd,
+      });
     writeFileSync(
       join(live, 'results.jsonl'),
       [
-        JSON.stringify({ executor: 'claude-cli', cost_usd: 0.5 }),
-        JSON.stringify({ executor: 'claude-cli', cost_usd: 0.7 }),
-        JSON.stringify({ executor: 'openrouter-agent', cost_usd: null }),
+        liveRow('claude-cli', 0, 0.5),
+        liveRow('claude-cli', 1, 0.7),
+        liveRow('openrouter-agent', 0, null),
       ].join('\n') + '\n',
     );
     writeFileSync(join(live, 'judge.jsonl'), JSON.stringify({ cost_usd: 0.001 }) + '\n');
@@ -449,7 +436,7 @@ describe('governance', () => {
     expect(rates.executors['claude-cli'].meanUsd).toBeCloseTo(0.6, 10);
     // A row without a reported cost is an UNKNOWN, never a $0 sample.
     expect(rates.executors['openrouter-agent'].meanUsd).toBeNull();
-    expect(rates.executors['openrouter-agent'].unknown).toBe(1);
+    expect(rates.executors['openrouter-agent'].unreported).toBe(1);
 
     const spec = await loadRunSpec(SPEC_ONE_ITEM);
     const matrix = computeCallMatrix(spec);
@@ -591,25 +578,8 @@ describe('governance', () => {
     expect(output).toContain('abandoned unrun');
   });
 
-  test('a fork-preparation failure yields an error row and releases the port', async () => {
-    const acquired: number[] = [];
-    const released: number[] = [];
-    const inner = createPortPool(39500, 8, false);
-    const countingPool: PortPool = {
-      size: 8,
-      acquire: () => {
-        const port = inner.acquire();
-        acquired.push(port);
-        return port;
-      },
-      release: (port: number) => {
-        released.push(port);
-        inner.release(port);
-      },
-    };
-
+  test('a fork-preparation failure yields an error row per cell', async () => {
     const code = await harness.run(['--spec', SPEC_ONE_ITEM, '--run-id', 'e2e-forkfail', '--mock'], {
-      portPool: countingPool,
       deps: {
         spawnWorker: () => {
           throw new Error('injected worker spawn failure');
@@ -627,9 +597,6 @@ describe('governance', () => {
       expect(row.judged).toBe(false);
       expect(row.drift_flag).toBeNull();
     }
-    // Every acquired port came back to the pool — no leak across 20 failures.
-    expect(acquired.length).toBe(20);
-    expect(released.length).toBe(20);
   });
 
   test('unknown cost is surfaced, never treated as $0', async () => {

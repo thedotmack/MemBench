@@ -54,8 +54,9 @@ import {
   buildExecEnv,
   capJson,
   capText,
-  captureGitDiff,
+  captureDiffInto,
   errorMessage,
+  fail,
   forkRootDir,
   runWithTimeout,
 } from './shared.js';
@@ -222,29 +223,26 @@ export function buildCodingTools(repoDir: string, options: CodingToolOptions) {
   return { bash, read_file: readFile, write_file: writeFile, edit_file: editFile };
 }
 
-async function workerGet(port: number, path: string, params: Record<string, unknown>): Promise<unknown> {
-  // Param passing mirrors the production MCP server's callWorker (CM
-  // mcp-server.ts:86-93 @ 132b46343): every defined arg becomes a query
-  // param, String()-coerced; null/undefined are dropped.
+/**
+ * One HTTP call to the fork's worker: GET with `params` as query params
+ * (mirroring the production MCP server's callWorker, CM mcp-server.ts:86-93
+ * @ 132b46343: every defined arg String()-coerced, null/undefined dropped),
+ * or POST with a JSON `body`.
+ */
+async function worker(
+  port: number,
+  path: string,
+  init: { params?: Record<string, unknown>; body?: Record<string, unknown> } = {},
+): Promise<unknown> {
   const searchParams = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
+  for (const [key, value] of Object.entries(init.params ?? {})) {
     if (value !== undefined && value !== null) searchParams.append(key, String(value));
   }
   const response = await fetch(`http://127.0.0.1:${port}${path}?${searchParams}`, {
     signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) {
-    throw new Error(`worker ${path} failed (${response.status}): ${await response.text()}`);
-  }
-  return await response.json();
-}
-
-async function workerPost(port: number, path: string, body: Record<string, unknown>): Promise<unknown> {
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
+    ...(init.body
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(init.body) }
+      : {}),
   });
   if (!response.ok) {
     throw new Error(`worker ${path} failed (${response.status}): ${await response.text()}`);
@@ -276,7 +274,7 @@ export function buildMemSearchTools(workerPort: number) {
       offset: z.number().optional(),
       orderBy: z.string().optional(),
     }),
-    execute: async (params: Record<string, unknown>) => workerGet(workerPort, '/api/search', params),
+    execute: async (params: Record<string, unknown>) => worker(workerPort, '/api/search', { params }),
   });
 
   const timeline = tool({
@@ -290,7 +288,7 @@ export function buildMemSearchTools(workerPort: number) {
       depth_after: z.number().optional(),
       project: z.string().optional(),
     }),
-    execute: async (params: Record<string, unknown>) => workerGet(workerPort, '/api/timeline', params),
+    execute: async (params: Record<string, unknown>) => worker(workerPort, '/api/timeline', { params }),
   });
 
   const getObservations = tool({
@@ -299,7 +297,7 @@ export function buildMemSearchTools(workerPort: number) {
       'Step 3: Fetch full details for filtered IDs. Params: ids (array of observation IDs, required)',
     inputSchema: z.object({ ids: z.array(z.number()) }),
     execute: async (params: { ids: number[] }) =>
-      workerPost(workerPort, '/api/observations/batch', params),
+      worker(workerPort, '/api/observations/batch', { body: params }),
   });
 
   return { search, timeline, get_observations: getObservations };
@@ -315,15 +313,11 @@ export interface OpenRouterAgentExecutorOptions {
    * fetcher is mocked). When absent a real client is constructed.
    */
   client?: OpenRouter;
-  /** Per-command bash tool timeout. Default 120s. */
-  bashTimeoutMs?: number;
-  /** Cap for tool outputs and transcript payload rows. Default ~50KB. */
-  outputCapBytes?: number;
 }
 
 /** Executor lane B: one @openrouter/agent tool loop per fork. */
 export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOptions): Executor {
-  const { model, bashTimeoutMs, outputCapBytes = 50_000 } = options;
+  const { model } = options;
 
   return {
     async execute(fork: ForkContext, prompt: string, budget: Budget): Promise<ExecutionRecord> {
@@ -351,7 +345,6 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
       };
       let memSearchCalls = 0;
       let result: ReturnType<OpenRouter['callModel']> | undefined;
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
       try {
         const client =
@@ -366,11 +359,7 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
             return new OpenRouter({ apiKey, retryConfig: { strategy: 'none' } });
           })();
 
-        const coding = buildCodingTools(fork.repoDir, {
-          env: buildExecEnv(fork.homeDir),
-          ...(bashTimeoutMs !== undefined ? { bashTimeoutMs } : {}),
-          outputCapBytes,
-        });
+        const coding = buildCodingTools(fork.repoDir, { env: buildExecEnv(fork.homeDir) });
         const memSearch = buildMemSearchTools(fork.workerPort);
         const tools: Tool[] = [
           coding.bash,
@@ -396,7 +385,7 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
                   type: 'tool_call',
                   at: Date.now(),
                   tool: payload.toolName,
-                  input: capJson(payload.toolInput, outputCapBytes),
+                  input: capJson(payload.toolInput),
                 }),
             },
           ],
@@ -408,7 +397,7 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
                   at: Date.now(),
                   tool: payload.toolName,
                   duration_ms: payload.durationMs,
-                  output: capJson(payload.toolOutput, outputCapBytes),
+                  output: capJson(payload.toolOutput),
                 }),
             },
           ],
@@ -419,7 +408,7 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
                   type: 'tool_failure',
                   at: Date.now(),
                   tool: payload.toolName,
-                  error: capJson(errorMessage(payload.error), outputCapBytes),
+                  error: capJson(errorMessage(payload.error)),
                 }),
             },
           ],
@@ -485,13 +474,17 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
               type: 'turn_end',
               at: Date.now(),
               turn: context.numberOfTurns,
-              output: capJson(response.output, outputCapBytes),
+              output: capJson(response.output),
               usage: response.usage ?? null,
             }),
         });
 
+        // AbortSignal.timeout's timer never holds the event loop open, so no
+        // clearTimeout bookkeeping is needed on the non-timeout paths.
         const timeout = new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(() => reject(new ExecutorTimeout()), budget.timeout_s * 1000);
+          AbortSignal.timeout(budget.timeout_s * 1000).addEventListener('abort', () =>
+            reject(new ExecutorTimeout()),
+          );
         });
         record.output = await Promise.race([result.getText(), timeout]);
       } catch (error: unknown) {
@@ -504,7 +497,6 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
           }
         }
       } finally {
-        clearTimeout(timeoutHandle);
         record.mem_search_calls = memSearchCalls;
         if (totals.usageSeen) {
           record.tokens_in = totals.tokensIn;
@@ -525,7 +517,7 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
           await appendJsonl(transcriptPath, {
             type: 'result',
             at: Date.now(),
-            output: capText(record.output, outputCapBytes),
+            output: capText(record.output),
             error: record.error ?? null,
             mem_search_calls: record.mem_search_calls,
             tokens_in: record.tokens_in ?? null,
@@ -543,17 +535,10 @@ export function createOpenRouterAgentExecutor(options: OpenRouterAgentExecutorOp
               : {}),
           });
         } catch (error: unknown) {
-          if (!record.error) record.error = `transcript write failed: ${errorMessage(error)}`;
+          fail(record, `transcript write failed: ${errorMessage(error)}`);
         }
 
-        try {
-          const diffPath = join(forkDir, 'executor.diff');
-          const diff = captureGitDiff(fork.repoDir, diffPath, fork.baseSha);
-          record.diff_path = diffPath;
-          if (!diff.ok && !record.error) record.error = diff.error ?? 'diff capture failed';
-        } catch (error: unknown) {
-          if (!record.error) record.error = `diff capture failed: ${errorMessage(error)}`;
-        }
+        captureDiffInto(record, fork.repoDir, forkDir, fork.baseSha);
       }
 
       return record;

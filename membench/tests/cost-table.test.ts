@@ -17,6 +17,7 @@ import {
   costMain,
   estimateObservePass,
   estimateRoute,
+  observeAllRate,
   readRunCostSample,
   renderCostTable,
   resolveTarget,
@@ -149,8 +150,8 @@ describe('measured rates', () => {
     expect(sample.observeByModel['obs/a'].meanUsd).toBeCloseTo(0.001, 10);
     expect(sample.observeByModel['obs/b'].meanUsd).toBeNull();
     expect(sample.observeByModel['obs/b'].unreported).toBe(1);
-    expect(sample.observeAll.calls).toBe(1);
-    expect(sample.observeAll.unreported).toBe(1);
+    expect(observeAllRate(sample).calls).toBe(1);
+    expect(observeAllRate(sample).unreported).toBe(1);
 
     expect(sample.executors['claude-cli'].meanUsd).toBeCloseTo(0.02, 10);
     expect(sample.executors['openrouter-agent'].calls).toBe(1);
@@ -187,8 +188,8 @@ describe('measured rates', () => {
       await readRunCostSample(join(runsDir, 'b'), 'b'),
     ]);
     expect(combined.runId).toBe('a + b');
-    expect(combined.observeAll.calls).toBe(2);
-    expect(combined.observeAll.meanUsd).toBeCloseTo(0.002, 10);
+    expect(observeAllRate(combined).calls).toBe(2);
+    expect(observeAllRate(combined).meanUsd).toBeCloseTo(0.002, 10);
     expect(combined.executors['claude-cli'].calls).toBe(3);
     expect(combined.executors['claude-cli'].meanUsd).toBeCloseTo(0.06 / 3, 10);
     expect(combined.executors['claude-cli'].meanUsd).not.toBeCloseTo(0.025, 5);

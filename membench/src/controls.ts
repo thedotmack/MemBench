@@ -9,8 +9,9 @@
  *              rows per SessionStore.importObservation:3110-3127 @
  *              132b46343) treats every variant identically.
  *   shuffled — a DIFFERENT item's model observations under a FIXED,
- *              deterministic mapping (sorted item ids rotated by 1) that
- *              Phase 6 records in the run manifest.
+ *              deterministic mapping (sorted item ids rotated by 1; built in
+ *              run-stage.ts resolveShuffledSources and recorded in the run
+ *              manifest).
  */
 
 import { existsSync } from 'node:fs';
@@ -141,28 +142,4 @@ export async function oracleObservations(item: CorpusItem): Promise<ParsedObserv
     throw new ControlSynthesisError(`corpus item ${item.id} has no oracle.md (${path})`);
   }
   return parseOracleObservations(await Bun.file(path).text(), item.id);
-}
-
-/**
- * The shuffled control's FIXED donor mapping: sorted item ids rotated by 1,
- * so item i is seeded with item i+1's model observations. Deterministic for
- * a given item set — Phase 6 records the returned mapping verbatim in the
- * run manifest. Requires ≥2 items (an item may never donate to itself).
- */
-export function shuffledSourceMap(itemIds: string[]): Record<string, string> {
-  const unique = [...new Set(itemIds)];
-  if (unique.length !== itemIds.length) {
-    throw new ControlSynthesisError('shuffledSourceMap: duplicate item ids');
-  }
-  if (unique.length < 2) {
-    throw new ControlSynthesisError(
-      `shuffledSourceMap needs at least 2 items (got ${unique.length}) — the shuffled control seeds a DIFFERENT item's observations`,
-    );
-  }
-  const sorted = [...unique].sort();
-  const mapping: Record<string, string> = {};
-  for (let i = 0; i < sorted.length; i++) {
-    mapping[sorted[i]] = sorted[(i + 1) % sorted.length];
-  }
-  return mapping;
 }

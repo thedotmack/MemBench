@@ -3,16 +3,12 @@
  * fork-runs). Lives on its own so neither stage imports the other for it.
  */
 
-/**
- * Run `worker` over `inputs` with at most `limit` in flight, preserving input
- * order in the returned array.
- */
-export async function mapWithConcurrency<T, R>(
+/** Run `worker` over `inputs` with at most `limit` in flight. */
+export async function mapWithConcurrency<T>(
   inputs: T[],
   limit: number,
-  worker: (input: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(inputs.length);
+  worker: (input: T, index: number) => Promise<unknown>,
+): Promise<void> {
   let next = 0;
   const lanes = Math.max(1, Math.min(limit, inputs.length));
   await Promise.all(
@@ -20,9 +16,8 @@ export async function mapWithConcurrency<T, R>(
       while (true) {
         const index = next++;
         if (index >= inputs.length) return;
-        results[index] = await worker(inputs[index], index);
+        await worker(inputs[index], index);
       }
     }),
   );
-  return results;
 }

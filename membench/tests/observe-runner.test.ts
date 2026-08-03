@@ -9,8 +9,6 @@ import codeMode from '../src/vendor/modes/code.json';
 import type { ModeConfig } from '../src/vendor/shims/types.ts';
 import type { ChatMessage, QueryModelOptions, QueryModelResult } from '../src/openrouter.ts';
 import {
-  JSON_ACCOMMODATION_INSTRUCTION,
-  mapJsonToObservations,
   runObserveItem,
   type ObserveItemInput,
   type ObserveToolCall,
@@ -105,7 +103,6 @@ describe('runObserveItem — conversation replay shape', () => {
     expect(calls[2].messages[4].content).toContain('<what_happened>Edit</what_happened>');
 
     expect(outcome.observations.map((o) => o.title)).toEqual(['First observation', 'Second observation']);
-    expect(outcome.accommodation).toBeUndefined();
     // A prose init acknowledgment is expected — no parse note for it.
     expect(outcome.parse_notes).toEqual([]);
     expect(outcome.usage_notes).toEqual([]);
@@ -114,7 +111,7 @@ describe('runObserveItem — conversation replay shape', () => {
     expect(outcome.obs_cost_usd).toBeCloseTo(0.003, 10);
   });
 
-  test('records a parse note on invalid XML and continues (1/3 fail: no accommodation)', async () => {
+  test('records a parse note on invalid XML and continues', async () => {
     const { query, calls } = scriptedQuery([
       reply('Ready.'),
       reply(obsXml('Kept one')),
@@ -129,10 +126,9 @@ describe('runObserveItem — conversation replay shape', () => {
     expect(outcome.parse_notes).toHaveLength(1);
     expect(outcome.parse_notes[0]).toContain('observation turn 2 (Edit)');
     expect(outcome.parse_notes[0]).toContain('failed to parse');
-    expect(outcome.accommodation).toBeUndefined();
   });
 
-  test('an empty observe turn is a parse note, is NOT appended to history, and 1/2 (=50%) does not trigger accommodation', async () => {
+  test('an empty observe turn is a parse note and is NOT appended to history', async () => {
     const { query, calls } = scriptedQuery([
       reply('Ready.'),
       reply('', { inputTokens: 50, outputTokens: 0, costUsd: 0.0005 }),
@@ -149,11 +145,9 @@ describe('runObserveItem — conversation replay shape', () => {
     expect(outcome.parse_notes).toHaveLength(1);
     expect(outcome.parse_notes[0]).toContain('observation turn 1 (Read)');
     expect(outcome.parse_notes[0]).toContain('empty response');
-    // Exactly 50% fail rate is not > 50% — no accommodation re-run.
-    expect(outcome.accommodation).toBeUndefined();
   });
 
-  test('an item with no tool calls is init-only: no accommodation, no division by zero', async () => {
+  test('an item with no tool calls is init-only: no division by zero', async () => {
     const { query, calls } = scriptedQuery([
       reply('Ready.'),
     ]);
@@ -164,61 +158,10 @@ describe('runObserveItem — conversation replay shape', () => {
     expect(calls[0].messages).toHaveLength(1);
     expect(outcome.observations).toEqual([]);
     expect(outcome.parse_notes).toEqual([]);
-    expect(outcome.accommodation).toBeUndefined();
     // Only the init turn's real usage is summed.
     expect(outcome.obs_tokens_in).toBe(100);
     expect(outcome.obs_tokens_out).toBe(20);
     expect(outcome.obs_cost_usd).toBeCloseTo(0.001, 10);
-    expect(outcome.usage_notes).toEqual([]);
-  });
-});
-
-describe('runObserveItem — JSON accommodation', () => {
-  test('>50% XML parse-fail re-runs with response_format json_object and maps JSON to observations', async () => {
-    const { query, calls } = scriptedQuery([
-      // XML pass: init ack, then both observation turns fail to parse.
-      reply('Ready.'),
-      reply('No XML from me, ever.'),
-      reply('Still refusing to emit tags.'),
-      // JSON pass: init reply, then two JSON observation replies.
-      reply('{"observations": []}'),
-      reply(JSON.stringify({
-        observations: [{
-          type: 'discovery',
-          title: 'From JSON one',
-          facts: ['fact one'],
-          concepts: ['gotcha: WASM quirk', 'discovery'],
-        }],
-      })),
-      reply(JSON.stringify({
-        observations: [{ type: 'bugfix', title: 'From JSON two', facts: ['fact two'] }],
-      })),
-    ]);
-
-    const outcome = await runObserveItem(makeItem([CALL_READ, CALL_EDIT]), 'test/model', { query });
-
-    expect(calls).toHaveLength(6);
-    // XML pass sends no response_format.
-    expect(calls[0].opts?.response_format).toBeUndefined();
-    expect(calls[2].opts?.response_format).toBeUndefined();
-    // JSON pass: response_format on every turn, JSON instruction on the init prompt.
-    expect(calls[3].opts?.response_format).toEqual({ type: 'json_object' });
-    expect(calls[5].opts?.response_format).toEqual({ type: 'json_object' });
-    expect(calls[3].messages[0].content).toContain(JSON_ACCOMMODATION_INSTRUCTION);
-    expect(calls[3].messages[0].content).toContain('Fix the flaky test');
-
-    expect(outcome.accommodation).toBe('json');
-    expect(outcome.observations.map((o) => o.title)).toEqual(['From JSON one', 'From JSON two']);
-    expect(outcome.observations[0].type).toBe('discovery');
-    // Parser-parity concept cleanup: colon-truncated, observation type dropped.
-    expect(outcome.observations[0].concepts).toEqual(['gotcha']);
-    expect(outcome.parse_notes[0]).toContain('re-ran with JSON accommodation');
-    expect(outcome.parse_notes.some((n) => n.includes('xml pass: observation turn 1'))).toBe(true);
-
-    // Real spend covers BOTH passes: 6 turns at 100/20/$0.001.
-    expect(outcome.obs_tokens_in).toBe(600);
-    expect(outcome.obs_tokens_out).toBe(120);
-    expect(outcome.obs_cost_usd).toBeCloseTo(0.006, 10);
     expect(outcome.usage_notes).toEqual([]);
   });
 });
@@ -257,33 +200,5 @@ describe('runObserveItem — usage accounting (real values only)', () => {
     expect(outcome.obs_cost_usd).toBeNull();
     expect(outcome.usage_notes).toHaveLength(3);
     expect(outcome.usage_notes.every((n) => n.startsWith('init turn:'))).toBe(true);
-  });
-});
-
-describe('mapJsonToObservations', () => {
-  test('rejects non-JSON and shapes without an observations array', () => {
-    expect(mapJsonToObservations('plain prose', mode)).toEqual({ valid: false });
-    expect(mapJsonToObservations('{"foo": 1}', mode)).toEqual({ valid: false });
-  });
-
-  test('{"observations": []} is the valid JSON skip', () => {
-    const mapped = mapJsonToObservations('{"observations": []}', mode);
-    expect(mapped.valid).toBe(true);
-    if (mapped.valid) expect(mapped.observations).toEqual([]);
-  });
-
-  test('missing type falls back to the mode\'s first observation type; empty entries are dropped', () => {
-    const mapped = mapJsonToObservations(JSON.stringify({
-      observations: [
-        { title: 'No type given', facts: ['f'] },
-        { type: 'discovery' }, // no content fields → dropped, like parser.ts:140-146
-      ],
-    }), mode);
-    expect(mapped.valid).toBe(true);
-    if (mapped.valid) {
-      expect(mapped.observations).toHaveLength(1);
-      expect(mapped.observations[0].type).toBe(mode.observation_types[0].id);
-      expect(mapped.observations[0].title).toBe('No type given');
-    }
   });
 });

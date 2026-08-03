@@ -1,5 +1,8 @@
 // Vendored from claude-mem src/sdk/parser.ts
-// Commit: 132b46343 — byte-identical except this 3-line header and the import shims on the first two lines
+// Commit: 132b46343 — TRIMMED vendored copy: the summary-mode surface
+// (ParsedSummary, <skip_summary/>, parseSummaryBlock) is removed as unused by
+// MemBench; the import shims replace claude-mem's internals; the remaining
+// observation-parsing code is otherwise unmodified.
 // Vendored: 2026-08-01 for MemBench
 
 import { logger } from './shims/logger.js';
@@ -26,19 +29,8 @@ export interface ParsedObservation {
   files_modified: string[];
 }
 
-export interface ParsedSummary {
-  request: string | null;
-  investigated: string | null;
-  learned: string | null;
-  completed: string | null;
-  next_steps: string | null;
-  notes: string | null;
-  skipped?: boolean;
-  skip_reason?: string | null;
-}
-
 export type ParseResult =
-  | { valid: true; observations: ParsedObservation[]; summary: ParsedSummary | null }
+  | { valid: true; observations: ParsedObservation[] }
   | { valid: false };
 
 export function parseAgentXml(raw: string, correlationId?: string | number): ParseResult {
@@ -48,43 +40,15 @@ export function parseAgentXml(raw: string, correlationId?: string | number): Par
 
   raw = stripCodeFences(raw);
 
-  const skipMatch = /<skip_summary(?:\s+reason="([^"]*)")?\s*\/>/.exec(raw);
-  if (skipMatch) {
-    return {
-      valid: true,
-      observations: [],
-      summary: {
-        request: null,
-        investigated: null,
-        learned: null,
-        completed: null,
-        next_steps: null,
-        notes: null,
-        skipped: true,
-        skip_reason: skipMatch[1] ?? null,
-      },
-    };
-  }
-
-  const firstRoot = /<(observation|summary)\b/i.exec(raw);
-  if (!firstRoot) {
+  if (!/<observation\b/i.test(raw)) {
     return { valid: false };
   }
 
-  const rootName = firstRoot[1].toLowerCase();
-  if (rootName === 'observation') {
-    const observations = parseObservationBlocks(raw, correlationId);
-    if (observations.length === 0) {
-      return { valid: false };
-    }
-    return { valid: true, observations, summary: null };
-  }
-
-  const summary = parseSummaryBlock(raw, correlationId);
-  if (!summary) {
+  const observations = parseObservationBlocks(raw, correlationId);
+  if (observations.length === 0) {
     return { valid: false };
   }
-  return { valid: true, observations: [], summary };
+  return { valid: true, observations };
 }
 
 function parseObservationBlocks(text: string, correlationId?: string | number): ParsedObservation[] {
@@ -158,35 +122,6 @@ function parseObservationBlocks(text: string, correlationId?: string | number): 
   }
 
   return observations;
-}
-
-function parseSummaryBlock(text: string, correlationId?: string | number): ParsedSummary | null {
-  const summaryRegex = /<summary>([\s\S]*?)<\/summary>/;
-  const summaryMatch = summaryRegex.exec(text);
-  if (!summaryMatch) return null;
-
-  const summaryContent = summaryMatch[1];
-
-  const request = extractField(summaryContent, 'request');
-  const investigated = extractField(summaryContent, 'investigated');
-  const learned = extractField(summaryContent, 'learned');
-  const completed = extractField(summaryContent, 'completed');
-  const next_steps = extractField(summaryContent, 'next_steps');
-  const notes = extractField(summaryContent, 'notes'); 
-
-  if (!request && !investigated && !learned && !completed && !next_steps) {
-    logger.warn('PARSER', 'Summary block has no sub-tags — rejecting false positive', { correlationId });
-    return null;
-  }
-
-  return {
-    request,
-    investigated,
-    learned,
-    completed,
-    next_steps,
-    notes,
-  };
 }
 
 function extractField(content: string, fieldName: string): string | null {

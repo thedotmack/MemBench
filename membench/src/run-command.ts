@@ -24,15 +24,22 @@
 
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { parseArgs } from 'node:util';
 import { loadConfig } from './config.js';
-import { defaultCorpusDir, listItems } from './corpus.js';
-import { createPortPool, type PortPool } from './fork.js';
+import { defaultCorpusDir, listItems } from './corpus-item.js';
+import { emptyRate, estimateUsd, merge, readRunCostSample, type PassRate } from './cost-table.js';
 import { appendJsonl, readJsonl } from './jsonl.js';
 import type { MockDepsOptions } from './mocks.js';
 import { createMockDeps } from './mocks.js';
 import type { QueryModelFn } from './observe-runner.js';
-import { loadCorpusItems, runObserveStage, type LoadedItem } from './observe-stage.js';
-import { readJudgeCosts, readObserveRecords, runIdError } from './scoreboard.js';
+import { loadCorpusItem, runObserveStage, type LoadedItem } from './observe-stage.js';
+import {
+  readJudgeCosts,
+  readManifest,
+  readObserveRecords,
+  runIdError,
+  type RunManifest,
+} from './scoreboard.js';
 import {
   CONTROL_VARIANTS,
   buildVariantPlans,
@@ -49,16 +56,14 @@ import {
 import { loadRunSpec, type RunSpec } from './spec.js';
 import type { ExecutorName, ResultRow } from './types.js';
 
-export class RunCommandError extends Error {}
-
 /**
  * Unreported-cost circuit breaker: when this many calls have come back
  * WITHOUT a reported cost and known spend is still $0, the run's real spend
  * is unbounded-unknown and the ceiling cannot protect anything — stop.
  */
-export const DEFAULT_MAX_UNREPORTED_CALLS = 50;
+const DEFAULT_MAX_UNREPORTED_CALLS = 50;
 
-export const RUN_HELP = `Usage: membench run --spec <path> --run-id <id> [options]
+const RUN_HELP = `Usage: membench run --spec <path> --run-id <id> [options]
 
 Required:
   --spec <path>              TOML run spec (run-specs/*.toml)
@@ -88,7 +93,7 @@ Paths / limits:
 // Flags
 // ---------------------------------------------------------------------------
 
-export interface RunFlags {
+interface RunFlags {
   spec?: string;
   runId?: string;
   dryRun: boolean;
@@ -105,161 +110,102 @@ export interface RunFlags {
   observeConcurrency?: number;
 }
 
-const VALUE_FLAGS = new Set([
-  '--spec',
-  '--run-id',
-  '--approve-cost-usd',
-  '--max-unreported-calls',
-  '--corpus-dir',
-  '--runs-dir',
-  '--claude-mem-root',
-  '--fork-concurrency',
-  '--observe-concurrency',
-]);
-const BOOLEAN_FLAGS = new Set([
-  '--dry-run',
-  '--resume',
-  '--retry-failed',
-  '--mock',
-  '--observe-only',
-  '--help',
-  '-h',
-]);
+function parseRunFlags(args: string[]): RunFlags & { help: boolean } {
+  const { values } = parseArgs({
+    args,
+    options: {
+      spec: { type: 'string' },
+      'run-id': { type: 'string' },
+      'approve-cost-usd': { type: 'string' },
+      'max-unreported-calls': { type: 'string' },
+      'corpus-dir': { type: 'string' },
+      'runs-dir': { type: 'string' },
+      'claude-mem-root': { type: 'string' },
+      'fork-concurrency': { type: 'string' },
+      'observe-concurrency': { type: 'string' },
+      'dry-run': { type: 'boolean' },
+      resume: { type: 'boolean' },
+      'retry-failed': { type: 'boolean' },
+      mock: { type: 'boolean' },
+      'observe-only': { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    strict: true,
+  });
 
-export function parseRunFlags(args: string[]): RunFlags & { help: boolean } {
-  const flags: RunFlags & { help: boolean } = {
-    dryRun: false,
-    resume: false,
-    retryFailed: false,
-    mock: false,
-    observeOnly: false,
-    help: false,
-  };
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let name = arg;
-    let inlineValue: string | undefined;
-    const eq = arg.indexOf('=');
-    if (arg.startsWith('--') && eq !== -1) {
-      name = arg.slice(0, eq);
-      inlineValue = arg.slice(eq + 1);
-    }
-    if (BOOLEAN_FLAGS.has(name)) {
-      if (name === '--dry-run') flags.dryRun = true;
-      else if (name === '--resume') flags.resume = true;
-      else if (name === '--retry-failed') flags.retryFailed = true;
-      else if (name === '--mock') flags.mock = true;
-      else if (name === '--observe-only') flags.observeOnly = true;
-      else flags.help = true;
-      continue;
-    }
-    if (!VALUE_FLAGS.has(name)) {
-      throw new RunCommandError(`unknown option: ${arg}`);
-    }
-    const value = inlineValue ?? args[++i];
-    if (value === undefined) throw new RunCommandError(`${name} requires a value`);
-    switch (name) {
-      case '--spec':
-        flags.spec = value;
-        break;
-      case '--run-id':
-        flags.runId = value;
-        break;
-      case '--approve-cost-usd': {
-        const parsed = Number.parseFloat(value);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-          throw new RunCommandError('--approve-cost-usd must be a positive number');
-        }
-        flags.approveCostUsd = parsed;
-        break;
-      }
-      case '--max-unreported-calls': {
-        const parsed = Number.parseInt(value, 10);
-        if (!Number.isInteger(parsed) || parsed < 0) {
-          throw new RunCommandError('--max-unreported-calls must be a non-negative integer');
-        }
-        flags.maxUnreportedCalls = parsed;
-        break;
-      }
-      case '--corpus-dir':
-        flags.corpusDir = value;
-        break;
-      case '--runs-dir':
-        flags.runsDir = value;
-        break;
-      case '--claude-mem-root':
-        flags.claudeMemRoot = value;
-        break;
-      case '--fork-concurrency':
-      case '--observe-concurrency': {
-        const parsed = Number.parseInt(value, 10);
-        if (!Number.isInteger(parsed) || parsed <= 0) {
-          throw new RunCommandError(`${name} must be a positive integer`);
-        }
-        if (name === '--fork-concurrency') flags.forkConcurrency = parsed;
-        else flags.observeConcurrency = parsed;
-        break;
-      }
+  let approveCostUsd: number | undefined;
+  if (values['approve-cost-usd'] !== undefined) {
+    approveCostUsd = Number.parseFloat(values['approve-cost-usd']);
+    if (!Number.isFinite(approveCostUsd) || approveCostUsd <= 0) {
+      throw new Error('--approve-cost-usd must be a positive number');
     }
   }
-  return flags;
+  let maxUnreportedCalls: number | undefined;
+  if (values['max-unreported-calls'] !== undefined) {
+    maxUnreportedCalls = Number.parseInt(values['max-unreported-calls'], 10);
+    if (!Number.isInteger(maxUnreportedCalls) || maxUnreportedCalls < 0) {
+      throw new Error('--max-unreported-calls must be a non-negative integer');
+    }
+  }
+  const positiveInt = (name: string, raw: string | undefined): number | undefined => {
+    if (raw === undefined) return undefined;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`--${name} must be a positive integer`);
+    return parsed;
+  };
+
+  return {
+    spec: values.spec,
+    runId: values['run-id'],
+    dryRun: values['dry-run'] ?? false,
+    resume: values.resume ?? false,
+    retryFailed: values['retry-failed'] ?? false,
+    mock: values.mock ?? false,
+    observeOnly: values['observe-only'] ?? false,
+    help: values.help ?? false,
+    approveCostUsd,
+    maxUnreportedCalls,
+    corpusDir: values['corpus-dir'],
+    runsDir: values['runs-dir'],
+    claudeMemRoot: values['claude-mem-root'],
+    forkConcurrency: positiveInt('fork-concurrency', values['fork-concurrency']),
+    observeConcurrency: positiveInt('observe-concurrency', values['observe-concurrency']),
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Measured rates (dry-run estimate)
 // ---------------------------------------------------------------------------
 
-export interface MeasuredRate {
-  /** Mean of REPORTED costs. null when nothing measured. */
-  meanUsd: number | null;
-  /** Calls that reported a cost. */
-  samples: number;
-  /** Calls that reported no cost (guard 1: never counted as $0). */
-  unknown: number;
-}
-
-export interface MeasuredRates {
+interface MeasuredRates {
   /**
    * Observe rate PER OBSERVER MODEL (a blended mean across models would price
    * a cheap model at an expensive model's rate). Keyed by the record's `model`
    * field, falling back to the artifact's slug for pre-Phase-6.1 records.
    */
-  observeByModel: Record<string, MeasuredRate>;
-  executors: Record<string, MeasuredRate>;
-  judge: MeasuredRate;
+  observeByModel: Record<string, PassRate>;
+  executors: Record<string, PassRate>;
+  judge: PassRate;
   /** Run ids the rates came from. */
   sourceRuns: string[];
   /** Mock run dirs skipped (their spend is fabricated). */
   skippedMockRuns: string[];
 }
 
-function emptyRate(): MeasuredRate {
-  return { meanUsd: null, samples: 0, unknown: 0 };
-}
-
-function foldRate(rate: MeasuredRate, costUsd: unknown): void {
-  if (typeof costUsd === 'number' && Number.isFinite(costUsd)) {
-    const total = (rate.meanUsd ?? 0) * rate.samples + costUsd;
-    rate.samples += 1;
-    rate.meanUsd = total / rate.samples;
-    return;
-  }
-  rate.unknown += 1;
-}
-
 /**
- * Harvest measured per-call rates from prior runs under runsDir.
+ * Harvest measured per-call rates from prior runs under runsDir, via the one
+ * shared per-run reader (cost-table.ts's readRunCostSample).
  *
  * Mock runs are SKIPPED (manifest.mock === true): their costs are canned
  * numbers, and letting them into an estimate would be exactly the fabricated
- * pricing guard 1 forbids. Runs without a manifest are also skipped — their
- * provenance (mock or live) is unknown.
+ * pricing guard 1 forbids. Runs without a readable manifest are also skipped —
+ * their provenance (mock or live) is unknown.
  */
 export async function readMeasuredRates(runsDir: string): Promise<MeasuredRates> {
   const rates: MeasuredRates = {
     observeByModel: {},
     executors: {},
-    judge: emptyRate(),
+    judge: emptyRate('judge'),
     sourceRuns: [],
     skippedMockRuns: [],
   };
@@ -268,46 +214,34 @@ export async function readMeasuredRates(runsDir: string): Promise<MeasuredRates>
   for (const entry of readdirSync(runsDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue;
     const runDir = join(runsDir, entry.name);
-    const manifestPath = join(runDir, 'manifest.json');
-    if (!existsSync(manifestPath)) continue;
-    let manifest: { mock?: unknown };
-    try {
-      manifest = JSON.parse(await Bun.file(manifestPath).text()) as { mock?: unknown };
-    } catch {
-      continue;
-    }
+    const manifest = await readManifest(runDir);
+    if (!manifest) continue;
     if (manifest.mock === true) {
       rates.skippedMockRuns.push(entry.name);
       continue;
     }
+    let sample;
+    try {
+      sample = await readRunCostSample(runDir, entry.name, () => {});
+    } catch {
+      // e.g. a hand-made dir whose name is not a valid run id — never a rate.
+      continue;
+    }
     rates.sourceRuns.push(entry.name);
-
-    // Shared readers (scoreboard.ts) — one implementation of "walk obs/ and
-    // judge.jsonl", three accumulators. An unreadable artifact contributes
-    // nothing here; it never becomes a guessed rate.
-    const { records } = await readObserveRecords(runDir, () => {});
-    for (const record of records) {
-      if (record.error) continue;
-      rates.observeByModel[record.model] ??= emptyRate();
-      foldRate(rates.observeByModel[record.model], record.obs_cost_usd);
+    for (const [model, rate] of Object.entries(sample.observeByModel)) {
+      rates.observeByModel[model] ??= emptyRate(`observe: ${model}`);
+      merge(rates.observeByModel[model], rate);
     }
-
-    const resultsPath = join(runDir, 'results.jsonl');
-    if (existsSync(resultsPath)) {
-      for (const row of await readJsonl<ResultRow>(resultsPath)) {
-        if (typeof row.executor !== 'string') continue;
-        // Errored runs still cost money; they are legitimate rate samples.
-        rates.executors[row.executor] ??= emptyRate();
-        foldRate(rates.executors[row.executor], row.cost_usd);
-      }
+    for (const [lane, rate] of Object.entries(sample.executors)) {
+      rates.executors[lane] ??= emptyRate(`executor: ${lane}`);
+      merge(rates.executors[lane], rate);
     }
-
-    for (const cost of await readJudgeCosts(runDir)) foldRate(rates.judge, cost);
+    merge(rates.judge, sample.judge);
   }
   return rates;
 }
 
-export interface CallMatrix {
+interface CallMatrix {
   items: number;
   models: number;
   variantsPerItem: number;
@@ -342,7 +276,7 @@ export function computeCallMatrix(spec: RunSpec): CallMatrix {
   };
 }
 
-export interface CostEstimate {
+interface CostEstimate {
   /** Sum over the components that HAVE a measured rate. */
   totalUsd: number | null;
   lines: string[];
@@ -355,26 +289,26 @@ export function estimateCost(matrix: CallMatrix, spec: RunSpec, rates: MeasuredR
   const missing: string[] = [];
   let total: number | null = null;
 
-  const addComponent = (label: string, calls: number, rate: MeasuredRate) => {
-    if (rate.meanUsd === null) {
+  const addComponent = (label: string, calls: number, rate: PassRate | undefined) => {
+    const component = estimateUsd(calls, rate);
+    if (component === null || rate === undefined) {
       missing.push(label);
       lines.push(`  ${label.padEnd(22)} ${String(calls).padStart(5)} calls × (no measured rate yet)`);
       return;
     }
-    const component = calls * rate.meanUsd;
     total = (total ?? 0) + component;
     lines.push(
-      `  ${label.padEnd(22)} ${String(calls).padStart(5)} calls × $${rate.meanUsd.toFixed(6)} = $${component.toFixed(4)}` +
-        `   [${rate.samples} measured${rate.unknown > 0 ? `, ${rate.unknown} without reported cost` : ''}]`,
+      `  ${label.padEnd(22)} ${String(calls).padStart(5)} calls × $${(rate.meanUsd ?? 0).toFixed(6)} = $${component.toFixed(4)}` +
+        `   [${rate.calls} measured${rate.unreported > 0 ? `, ${rate.unreported} without reported cost` : ''}]`,
     );
   };
 
   // One component per observer model: observe cost is model-specific.
   for (const model of spec.observer_models) {
-    addComponent(`observe:${model}`, matrix.items, rates.observeByModel[model] ?? emptyRate());
+    addComponent(`observe:${model}`, matrix.items, rates.observeByModel[model]);
   }
   for (const lane of spec.executors) {
-    addComponent(lane, matrix.executorRunsPerLane, rates.executors[lane] ?? emptyRate());
+    addComponent(lane, matrix.executorRunsPerLane, rates.executors[lane]);
   }
   addComponent('judge', matrix.judgeCallsMax, rates.judge);
 
@@ -389,7 +323,7 @@ export function estimateCost(matrix: CallMatrix, spec: RunSpec, rates: MeasuredR
  * Human-readable spend line. The unknown count is ALWAYS printed when
  * non-zero: a run whose provider reported no usage must never look free.
  */
-export function formatSpend(tracker: SpendTracker): string {
+function formatSpend(tracker: SpendTracker): string {
   const lines = [`REAL SPEND: $${tracker.knownUsd.toFixed(4)} (reported costs only)`];
   if (tracker.unknownCount > 0) {
     const bySource = (Object.keys(tracker.bySource) as (keyof typeof tracker.bySource)[])
@@ -414,11 +348,10 @@ export interface RunOverrides {
   deps?: Partial<ExecuteStageDeps>;
   /** Observe + judge transport override (wins over --mock's provider). */
   query?: QueryModelFn;
-  portPool?: PortPool;
   log?: (message: string) => void;
 }
 
-interface ManifestShape {
+export interface ManifestShape {
   run_id: string;
   created_at: string;
   mock: boolean;
@@ -435,15 +368,6 @@ interface ManifestShape {
   resumes: string[];
 }
 
-async function loadPriorManifest(path: string): Promise<Partial<ManifestShape> | undefined> {
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(await Bun.file(path).text()) as Partial<ManifestShape>;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Seed the spend tracker from artifacts already in the run dir, so a resumed
  * run's ceiling accounts for what the earlier attempt already spent.
@@ -454,21 +378,21 @@ async function seedTrackerFromRunDir(runDir: string, tracker: SpendTracker): Pro
   const { records } = await readObserveRecords(runDir, () => {});
   for (const record of records) {
     if (record.error) continue;
-    tracker.add('obs', record.obs_cost_usd, `${record.item_id} × ${record.model} (prior attempt)`);
+    tracker.add('obs', record.obs_cost_usd);
   }
   const resultsPath = join(runDir, 'results.jsonl');
   if (existsSync(resultsPath)) {
     for (const row of await readJsonl<ResultRow>(resultsPath)) {
-      tracker.add('executor', row.cost_usd, `${row.item_id} ${row.variant} ${row.executor} (prior attempt)`);
+      tracker.add('executor', row.cost_usd);
     }
   }
   for (const cost of await readJudgeCosts(runDir)) {
-    tracker.add('judge', cost, 'judge call (prior attempt)');
+    tracker.add('judge', cost);
   }
 }
 
 /** Completed (item, variant, executor, run_index) keys from results.jsonl. */
-export async function readCompletedCells(resultsPath: string): Promise<Set<string>> {
+async function readCompletedCells(resultsPath: string): Promise<Set<string>> {
   const completed = new Set<string>();
   if (!existsSync(resultsPath)) return completed;
   for (const row of await readJsonl<ResultRow>(resultsPath)) {
@@ -484,7 +408,7 @@ export async function readCompletedCells(resultsPath: string): Promise<Set<strin
  * discarded — the failed attempt stays auditable), and results.jsonl keeps
  * exactly one row per cell.
  */
-export async function applyRetryFailed(
+async function applyRetryFailed(
   runDir: string,
   log: (message: string) => void,
 ): Promise<Set<string>> {
@@ -515,8 +439,8 @@ export async function applyRetryFailed(
  * corpus hash would silently mix incomparable rows — and resuming a mock run
  * "live" would relabel canned costs as measured rates (guard 1).
  */
-export function checkResumeCompatibility(
-  prior: Partial<ManifestShape> | undefined,
+function checkResumeCompatibility(
+  prior: RunManifest | null,
   current: { mock: boolean; spec: RunSpec; items: LoadedItem[] },
 ): string | undefined {
   if (!prior) return undefined;
@@ -585,15 +509,17 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
   let items: LoadedItem[];
   try {
     spec = await loadRunSpec(flags.spec);
-    items = await loadCorpusItems(corpusDir, spec.corpus_items, { requireFrozen: true });
+    items = [];
+    for (const id of spec.corpus_items) {
+      items.push(await loadCorpusItem(corpusDir, id, { requireFrozen: true }));
+    }
   } catch (error: unknown) {
     console.error(`membench run: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
 
   const matrix = computeCallMatrix(spec);
-  const requestedForkConcurrency =
-    flags.forkConcurrency ?? spec.fork_concurrency ?? DEFAULT_FORK_CONCURRENCY;
+  const forkConcurrency = flags.forkConcurrency ?? spec.fork_concurrency ?? DEFAULT_FORK_CONCURRENCY;
   const observeConcurrency = flags.observeConcurrency ?? spec.observe_concurrency ?? 4;
 
   // Spec-level wiring check both paths need: the openrouter-agent lane has no
@@ -611,50 +537,46 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
     }
     const rates = await readMeasuredRates(runsDir);
     const estimate = estimateCost(matrix, spec, rates);
-    log(`DRY RUN — spec ${flags.spec}, run-id ${flags.runId} (no network, nothing written)`);
-    log('');
-    log('Corpus items (frozen):');
-    for (const item of items) log(`  ${item.id}  ${item.contentHash}`);
-    log('');
-    log('Planned call matrix:');
-    log(`  items                 ${matrix.items}`);
-    log(`  observer models       ${matrix.models}`);
-    log(`  variants per item     ${matrix.variantsPerItem} (${matrix.models} model(s) + ${CONTROL_VARIANTS.join('/')})`);
-    log(`  executors             ${matrix.executors} (${spec.executors.join(', ')})`);
-    log(`  k                     ${matrix.k}`);
-    log(`  observe calls         items × models = ${matrix.observeCalls}`);
-    log(
-      `  executor runs         items × (models+${CONTROL_VARIANTS.length}) × executors × k = ${matrix.executorRuns}` +
-        ` (${matrix.executorRunsPerLane} per lane)`,
-    );
-    log(`  judge calls (max)     ${matrix.judgeCallsMax}`);
-    log('');
-    log('Cost estimate (measured rates from prior runs only — never priced from a table):');
-    if (rates.sourceRuns.length === 0) {
-      log('  no measured rates yet — no prior non-mock run under ' + runsDir);
-    } else {
-      log(`  rate sources: ${rates.sourceRuns.join(', ')}`);
-    }
-    if (rates.skippedMockRuns.length > 0) {
-      log(`  skipped mock runs (fabricated spend): ${rates.skippedMockRuns.join(', ')}`);
-    }
-    for (const line of estimate.lines) log(line);
-    if (estimate.totalUsd === null) {
-      log('  TOTAL: no measured rates yet — run a live item first to produce rates');
-    } else {
-      log(`  TOTAL (measured components only): $${estimate.totalUsd.toFixed(4)}`);
-    }
-    if (estimate.missing.length > 0) {
-      log(`  !! excluded from the total (no measured rate): ${estimate.missing.join(', ')}`);
-    }
-    log('');
-    log(`Live runs require --approve-cost-usd; the ceiling is enforced on REAL reported spend between items.`);
+    const estimateLines = [
+      rates.sourceRuns.length === 0
+        ? `  no measured rates yet — no prior non-mock run under ${runsDir}`
+        : `  rate sources: ${rates.sourceRuns.join(', ')}`,
+      ...(rates.skippedMockRuns.length > 0
+        ? [`  skipped mock runs (fabricated spend): ${rates.skippedMockRuns.join(', ')}`]
+        : []),
+      ...estimate.lines,
+      estimate.totalUsd === null
+        ? '  TOTAL: no measured rates yet — run a live item first to produce rates'
+        : `  TOTAL (measured components only): $${estimate.totalUsd.toFixed(4)}`,
+      ...(estimate.missing.length > 0
+        ? [`  !! excluded from the total (no measured rate): ${estimate.missing.join(', ')}`]
+        : []),
+    ].join('\n');
+    log(`DRY RUN — spec ${flags.spec}, run-id ${flags.runId} (no network, nothing written)
+
+Corpus items (frozen):
+${items.map((item) => `  ${item.id}  ${item.contentHash}`).join('\n')}
+
+Planned call matrix:
+  items                 ${matrix.items}
+  observer models       ${matrix.models}
+  variants per item     ${matrix.variantsPerItem} (${matrix.models} model(s) + ${CONTROL_VARIANTS.join('/')})
+  executors             ${matrix.executors} (${spec.executors.join(', ')})
+  k                     ${matrix.k}
+  observe calls         items × models = ${matrix.observeCalls}
+  executor runs         items × (models+${CONTROL_VARIANTS.length}) × executors × k = ${matrix.executorRuns} (${matrix.executorRunsPerLane} per lane)
+  judge calls (max)     ${matrix.judgeCallsMax}
+
+Cost estimate (measured rates from prior runs only — never priced from a table):
+${estimateLines}
+
+Live runs require --approve-cost-usd; the ceiling is enforced on REAL reported spend between items.`);
     return 0;
   }
 
   // --- governance gates ----------------------------------------------------
   const manifestPath = join(runDir, 'manifest.json');
-  const prior = await loadPriorManifest(manifestPath);
+  const prior = await readManifest(runDir);
   // A run dir with a manifest is an EXISTING run even before its first row:
   // `observe` writes the manifest + obs artifacts, and a later `run` on the
   // same id must continue it (reusing that spend), not restart it.
@@ -738,18 +660,7 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
 
   let deps: ExecuteStageDeps;
   let query: QueryModelFn | undefined;
-  const portPool = overrides.portPool ?? createPortPool();
   let mockFarmStop: (() => void) | undefined;
-
-  // Each live fork holds one port for its whole life, so more concurrent
-  // forks than ports would exhaust the pool mid-run.
-  const forkConcurrency = Math.max(1, Math.min(requestedForkConcurrency, portPool.size ?? Infinity));
-  if (forkConcurrency !== requestedForkConcurrency) {
-    log(
-      `note: fork concurrency capped at ${forkConcurrency} by the port pool ` +
-        `(${portPool.size} port(s) available; requested ${requestedForkConcurrency}).`,
-    );
-  }
 
   if (flags.mock) {
     const mocks = createMockDeps({ lanes: spec.executors, ...(overrides.mock ?? {}) });
@@ -757,7 +668,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
     query = overrides.query ?? mocks.query;
     deps = {
       executors: mocks.executors,
-      portPool,
       spawnWorker: mocks.spawnWorker,
       cloneRepo: mocks.cloneRepo,
       killTree: mocks.killTree,
@@ -774,7 +684,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       query = overrides.query;
       deps = {
         executors,
-        portPool,
         claudeMemRoot: config.claudeMemRoot,
         apiKey: config.openrouterApiKey,
         ...(query ? { query } : {}),
@@ -840,10 +749,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
         `$${reserveUsd.toFixed(4)} reserved${reserveNote} >= effective ceiling $${ceiling.toFixed(4)}.`
       );
     }
-    return plainStopReason();
-  };
-
-  const plainStopReason = (): string | undefined => {
     if (tracker.knownUsd >= ceiling) {
       return (
         `COST CEILING REACHED: real reported spend $${tracker.knownUsd.toFixed(4)} >= ` +
@@ -916,11 +821,6 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
     return preflight(perRun * context.inFlight, note);
   };
 
-  const ceilingCheck = (stage: string) => (itemId: string): 'continue' | 'stop' => {
-    log(`${stage} complete for ${itemId}. ${formatSpend(tracker)}`);
-    return preflight();
-  };
-
   try {
     // --- stage 1: observe --------------------------------------------------
     const observeResult = await runObserveStage({
@@ -931,16 +831,21 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       ...(config.openrouterApiKey && !flags.mock ? { apiKey: config.openrouterApiKey } : {}),
       timeoutS: spec.observe_timeout_s,
       concurrency: observeConcurrency,
-      onRecord: (itemId, model, record, reused) => {
-        // Reused records were already counted when the tracker was seeded
-        // from the run dir (--resume); counting them again would double-charge.
-        // Without that seeding they are counted here.
-        if (reused && flags.resume) return;
-        if (record.error) return; // a failed replay is an error record, not spend
-        tracker.add('obs', record.obs_cost_usd, `${itemId} × ${model}`);
+      governance: (event) => {
+        if (event.type === 'record') {
+          // Reused records were already counted when the tracker was seeded
+          // from the run dir (--resume); counting them again would
+          // double-charge. A failed replay is an error record, not spend.
+          if (!(event.reused && flags.resume) && !event.record.error) {
+            tracker.add('obs', event.record.obs_cost_usd);
+          }
+          return 'continue';
+        }
+        if (event.type === 'item') {
+          log(`observe complete for ${event.itemId}. ${formatSpend(tracker)}`);
+        }
+        return preflight();
       },
-      beforeCall: preflight,
-      betweenItems: ceilingCheck('observe'),
       log,
     });
 
@@ -991,7 +896,10 @@ export async function runMain(args: string[], overrides: RunOverrides = {}): Pro
       concurrency: forkConcurrency,
       tracker,
       beforeCell: cellPreflight,
-      betweenItems: ceilingCheck('execute'),
+      betweenItems: (itemId) => {
+        log(`execute complete for ${itemId}. ${formatSpend(tracker)}`);
+        return preflight();
+      },
       log,
     });
 
@@ -1040,7 +948,7 @@ async function buildLiveExecutors(
       // unless we seed them. Resolved once per run and reused for every fork.
       const credentialsJson = resolveClaudeCredentials();
       if (!credentialsJson) {
-        throw new RunCommandError(
+        throw new Error(
           'the claude-cli lane found no Claude Code credentials to seed into the isolated fork HOME.\n' +
             '  Run `claude login` on this host, or point MEMBENCH_CLAUDE_CREDENTIALS_FILE at a\n' +
             '  .credentials.json. Without it every fork-run fails "Not logged in".',
@@ -1053,7 +961,7 @@ async function buildLiveExecutors(
       });
     } else {
       if (!spec.executor_model) {
-        throw new RunCommandError(
+        throw new Error(
           'the openrouter-agent lane needs `executor_model = "<model id>"` in the run spec',
         );
       }
@@ -1062,9 +970,4 @@ async function buildLiveExecutors(
     }
   }
   return executors;
-}
-
-/** `membench observe` — stage 1 only, same governance. */
-export async function observeMain(args: string[], overrides: RunOverrides = {}): Promise<number> {
-  return runMain([...args, '--observe-only'], overrides);
 }

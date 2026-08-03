@@ -56,8 +56,9 @@ import type { Budget, ExecutionRecord, Executor, ForkContext } from '../types.js
 import {
   asFiniteNumber,
   buildExecEnv,
-  captureGitDiff,
+  captureDiffInto,
   errorMessage,
+  fail,
   forkRootDir,
   runWithTimeout,
 } from './shared.js';
@@ -251,10 +252,7 @@ interface CliJsonResult {
  * mixes log lines into stdout.
  */
 export function parseCliJsonOutput(stdout: string): CliJsonResult | undefined {
-  const candidates = [stdout.trim()];
-  const lines = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
-  const lastLine = lines[lines.length - 1];
-  if (lastLine !== undefined && lastLine !== candidates[0]) candidates.push(lastLine);
+  const candidates = [stdout.trim(), stdout.trimEnd().split('\n').at(-1) ?? ''];
 
   for (const candidate of candidates) {
     let parsed: unknown;
@@ -443,18 +441,11 @@ export function createClaudeCliExecutor(options: ClaudeCliExecutorOptions = {}):
           }
         }
       } catch (error: unknown) {
-        if (!record.error) record.error = errorMessage(error);
+        fail(record, errorMessage(error));
       } finally {
         // Artifact retention runs on every path (success, error, timeout) and
         // must never lose the row (guard 3).
-        try {
-          const diffPath = join(forkDir, 'executor.diff');
-          const diff = captureGitDiff(fork.repoDir, diffPath, fork.baseSha);
-          record.diff_path = diffPath;
-          if (!diff.ok && !record.error) record.error = diff.error ?? 'diff capture failed';
-        } catch (error: unknown) {
-          if (!record.error) record.error = `diff capture failed: ${errorMessage(error)}`;
-        }
+        captureDiffInto(record, fork.repoDir, forkDir, fork.baseSha);
 
         try {
           const source = findSessionTranscript(fork.homeDir, sessionId);
@@ -474,14 +465,14 @@ export function createClaudeCliExecutor(options: ClaudeCliExecutorOptions = {}):
             else delete record.tokens_in;
             if (usage.tokensOut !== undefined) record.tokens_out = usage.tokensOut;
             else delete record.tokens_out;
-          } else if (!record.error) {
+          } else {
             // A successful run MUST leave a session transcript — a CLI layout
             // change that hides it would otherwise silently zero
             // mem_search_calls for the whole lane.
-            record.error = 'session transcript not found under fork HOME';
+            fail(record, 'session transcript not found under fork HOME');
           }
         } catch (error: unknown) {
-          if (!record.error) record.error = `transcript retention failed: ${errorMessage(error)}`;
+          fail(record, `transcript retention failed: ${errorMessage(error)}`);
         }
 
         // Live OAuth credentials must never outlive the run that needed them.
@@ -493,7 +484,7 @@ export function createClaudeCliExecutor(options: ClaudeCliExecutorOptions = {}):
           try {
             rmSync(join(fork.homeDir, '.claude', '.credentials.json'), { force: true });
           } catch (error: unknown) {
-            if (!record.error) record.error = `credential cleanup failed: ${errorMessage(error)}`;
+            fail(record, `credential cleanup failed: ${errorMessage(error)}`);
           }
         }
       }

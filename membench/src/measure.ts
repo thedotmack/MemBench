@@ -128,34 +128,25 @@ export function buildJudgePrompt(request: JudgeRequest): string {
   return sections.join('\n');
 }
 
-/** Tolerant parse of a judge reply: bare JSON, fenced JSON, or JSON in prose. */
+/** Tolerant parse of a judge reply: the braced JSON object, wherever it sits. */
 export function parseJudgeReply(raw: string): JudgeVerdict | undefined {
-  const candidates: string[] = [];
-  const trimmed = raw.trim();
-  candidates.push(trimmed);
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced) candidates.push(fenced[1].trim());
-  const braced = trimmed.match(/\{[\s\S]*\}/);
-  if (braced) candidates.push(braced[0]);
-
-  for (const candidate of candidates) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      continue;
-    }
-    if (typeof parsed !== 'object' || parsed === null) continue;
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.drift !== 'boolean') continue;
-    const verdict: JudgeVerdict = {
-      drift: record.drift,
-      note: typeof record.note === 'string' ? record.note : '',
-    };
-    if (typeof record.success === 'boolean') verdict.success = record.success;
-    return verdict;
+  const braced = raw.match(/\{[\s\S]*\}/);
+  if (!braced) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(braced[0]);
+  } catch {
+    return undefined;
   }
-  return undefined;
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.drift !== 'boolean') return undefined;
+  const verdict: JudgeVerdict = {
+    drift: record.drift,
+    note: typeof record.note === 'string' ? record.note : '',
+  };
+  if (typeof record.success === 'boolean') verdict.success = record.success;
+  return verdict;
 }
 
 export interface JudgeCallResult {
@@ -178,7 +169,7 @@ export interface JudgeCallResult {
 export async function callJudge(
   judgeModel: string,
   request: JudgeRequest,
-  options: { query?: QueryModelFn; apiKey?: string; timeoutS?: number } = {},
+  options: { query?: QueryModelFn; apiKey?: string } = {},
 ): Promise<JudgeCallResult> {
   const query = options.query ?? queryModel;
   const prompt = buildJudgePrompt(request);
@@ -186,9 +177,9 @@ export async function callJudge(
     const response = await query(judgeModel, [{ role: 'user', content: prompt }], {
       ...(options.apiKey ? { apiKey: options.apiKey } : {}),
       // Deterministic adjudication; the judge emits a small JSON object.
+      // Per-attempt timeout comes from retry.ts's 30s default.
       temperature: 0,
       maxTokens: 512,
-      ...(options.timeoutS ? { abortSignal: AbortSignal.timeout(options.timeoutS * 1000) } : {}),
     });
     const result: JudgeCallResult = {
       called: true,
@@ -229,8 +220,6 @@ export interface MeasureOptions {
   judgeModel: string;
   query?: QueryModelFn;
   apiKey?: string;
-  checkTimeoutMs?: number;
-  judgeTimeoutS?: number;
 }
 
 export interface MeasureResult {
@@ -272,11 +261,9 @@ export async function measureRun(options: MeasureOptions): Promise<MeasureResult
     judgeModel,
     query,
     apiKey,
-    checkTimeoutMs,
-    judgeTimeoutS,
   } = options;
 
-  const check = await runCheckScript(item, repoDir, homeDir, checkTimeoutMs);
+  const check = await runCheckScript(item, repoDir, homeDir);
   const needsJudgeForSuccess = check.exitCode === CHECK_EXIT_JUDGE;
   const mechanicalSuccess = check.exitCode === CHECK_EXIT_PASS;
 
@@ -334,7 +321,7 @@ export async function measureRun(options: MeasureOptions): Promise<MeasureResult
       executorOutput,
       ...(rubric !== undefined ? { rubric } : {}),
     },
-    { ...(query ? { query } : {}), ...(apiKey ? { apiKey } : {}), ...(judgeTimeoutS ? { timeoutS: judgeTimeoutS } : {}) },
+    { ...(query ? { query } : {}), ...(apiKey ? { apiKey } : {}) },
   );
 
   // judged reflects a COMPLETED call: a transport failure never happened as

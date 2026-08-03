@@ -69,8 +69,6 @@ export interface ResultRow {
   /** Whether a judge model call actually completed for this run. */
   judged: boolean;
   drift_note?: string;
-  /** e.g. "json" when the JSON-mode accommodation was applied (plan Phase 2). */
-  accommodation?: string;
   error?: string;
 }
 

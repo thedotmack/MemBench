@@ -20,8 +20,8 @@
  *     (:221) is always true here.
  *   - Retry-dedup header renamed x-claude-mem-prior-request-id →
  *     x-membench-prior-request-id.
- *   - opts adds `response_format` (JSON accommodation, plan Phase 2) and an
- *     external AbortSignal / retry-timing knobs (offline tests).
+ *   - opts adds `response_format` (structured-output callers) and an
+ *     external AbortSignal / backoff base-delay knob (offline tests).
  *
  * Prompt caching (opts.cacheControl, default OFF) — https://openrouter.ai/docs/features/prompt-caching
  * The observe replay is ONE growing conversation: every turn re-sends the whole
@@ -72,7 +72,6 @@ export function classifyOpenRouterError(input: {
   bodyText?: string;
   headers?: Headers | { get(name: string): string | null };
   cause: unknown;
-  requestId?: string;
 }): ClassifiedProviderError {
   const status = input.status;
   const body = input.bodyText ?? '';
@@ -165,7 +164,7 @@ interface OpenRouterResponse {
 export interface QueryModelOptions {
   /** Defaults to OPENROUTER_API_KEY from the environment. */
   apiKey?: string;
-  /** JSON accommodation (plan Phase 2): forwarded verbatim in the body. */
+  /** Forwarded verbatim in the request body when a caller wants JSON output. */
   response_format?: { type: 'json_object' };
   /**
    * Request-shape overrides for non-observe callers (e.g. Phase 6's judge).
@@ -182,9 +181,7 @@ export interface QueryModelOptions {
    * `cache_control: {type:'ephemeral'}` field; absent by default.
    */
   cacheControl?: boolean;
-  /** Retry knobs (offline tests); defaults come from retry.ts (2 / 30s / 100ms). */
-  maxRetries?: number;
-  perAttemptTimeoutMs?: number;
+  /** Retry backoff base delay (offline tests); default comes from retry.ts (100ms). */
   baseDelayMs?: number;
 }
 
@@ -260,7 +257,6 @@ export async function queryModel(
         bodyText: errorText,
         headers: response.headers,
         cause: new Error(`OpenRouter API error: ${response.status} - ${errorText}`),
-        ...(requestId ? { requestId } : {}),
       });
     }
 
@@ -280,8 +276,6 @@ export async function queryModel(
   }, {
     label: `OpenRouter ${model}`,
     ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
-    ...(opts.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
-    ...(opts.perAttemptTimeoutMs !== undefined ? { perAttemptTimeoutMs: opts.perAttemptTimeoutMs } : {}),
     ...(opts.baseDelayMs !== undefined ? { baseDelayMs: opts.baseDelayMs } : {}),
   });
 
