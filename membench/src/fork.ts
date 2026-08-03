@@ -56,12 +56,36 @@ function assertWorkerRuntime(env: Record<string, string>): void {
   }
 }
 
-/** An OS-assigned free port: bind port 0, read the assignment, release it. */
+/**
+ * Ports handed out by freePort() and not yet released. The probe socket is
+ * closed before the worker binds, so without this two concurrent
+ * prepareFork() calls could be issued the same number (PR #2 review P1).
+ */
+const issuedPorts = new Set<number>();
+
+/**
+ * An OS-assigned free port: bind port 0, read the assignment, release it.
+ * Issued numbers are tracked until releasePort() so concurrent callers always
+ * get distinct ports; the remaining race — an unrelated process claiming the
+ * number in the probe-to-bind window — is handled by prepareFork's respawn
+ * retry.
+ */
 export function freePort(): number {
-  const probe = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response('') });
-  const port = probe.port!;
-  probe.stop(true);
-  return port;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const probe = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response('') });
+    const port = probe.port!;
+    probe.stop(true);
+    if (!issuedPorts.has(port)) {
+      issuedPorts.add(port);
+      return port;
+    }
+  }
+  throw new ForkError('freePort: no unissued port after 50 attempts');
+}
+
+/** Return a freePort()-issued number to the pool (no-op for pinned ports). */
+export function releasePort(port: number): void {
+  issuedPorts.delete(port);
 }
 
 // ---------------------------------------------------------------------------
@@ -419,10 +443,28 @@ export async function prepareFork(
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
 
-  const port = options.port ?? freePort();
-  const env = buildWorkerEnv(dataDir, port, homeDir);
-  assertWorkerRuntime(env); // guard 8
-  const worker = spawnWorker({ claudeMemRoot, env, cwd: claudeMemRoot });
+  // Spawn + readiness, with one respawn retry on the port-steal signature:
+  // freePort() closes its probe before the worker binds, so an unrelated
+  // process can claim the number in that window — the worker then exits
+  // without serving. A retry gets a fresh number (or re-tries a pinned one).
+  let port: number;
+  let worker: WorkerHandle;
+  for (let attempt = 1; ; attempt++) {
+    port = options.port ?? freePort();
+    const env = buildWorkerEnv(dataDir, port, homeDir);
+    assertWorkerRuntime(env); // guard 8
+    worker = spawnWorker({ claudeMemRoot, env, cwd: claudeMemRoot });
+    try {
+      await waitForReadiness(port, worker, readinessTimeoutMs);
+      break;
+    } catch (error) {
+      await killTree(worker);
+      releasePort(port);
+      const earlyExit =
+        error instanceof Error && error.message.includes('exited before /api/readiness');
+      if (attempt >= 2 || !earlyExit) throw error;
+    }
+  }
 
   const fork: PreparedFork = {
     repoDir,
@@ -440,8 +482,6 @@ export async function prepareFork(
   };
 
   try {
-    await waitForReadiness(port, worker, readinessTimeoutMs);
-
     if (variant !== 'none') {
       const baseEpochSource = provenance.dates?.session_n_ended;
       const baseEpoch = baseEpochSource ? Date.parse(baseEpochSource) : Date.now();
@@ -498,6 +538,7 @@ export interface TeardownForkOptions {
  */
 export async function teardownFork(fork: PreparedFork, options: TeardownForkOptions): Promise<void> {
   await fork.killTree();
+  releasePort(fork.workerPort);
   if (!options.keepData) {
     assertOutsideClaudeMem(fork.dataDir, ForkError); // guard 4, defense in depth before rm -rf
     rmSync(fork.dataDir, { recursive: true, force: true });

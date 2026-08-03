@@ -22,6 +22,7 @@ import {
   cloneRepoAtCommit,
   freePort,
   prepareFork,
+  releasePort,
   teardownFork,
   type PreparedFork,
   type SpawnWorkerFn,
@@ -436,18 +437,49 @@ describe('prepareFork against a stub worker', () => {
     stub.stop();
   });
 
-  test('fails fast when the worker process exits before readiness', async () => {
+  test('fails fast when the worker process exits before readiness (after one respawn retry)', async () => {
     const stub = startStubWorker({ readinessFailures: 1_000_000 });
     const item = makeItemDir('item-earlyexit', repoPath, pinnedCommit);
+    let spawns = 0;
     const attempt = prepareFork(item, 'oracle', tempDir('runs-earlyexit'), {
       runId: 'run-001',
       port: stub.port,
       observations: [OBS_A],
-      spawnWorker: () => fakeWorker({ exited: Promise.resolve(1) }),
+      spawnWorker: () => {
+        spawns++;
+        return fakeWorker({ exited: Promise.resolve(1) });
+      },
       killTree: async () => {},
       readinessTimeoutMs: 5_000,
     });
     await expect(attempt).rejects.toThrow('exited before');
+    expect(spawns).toBe(2); // port-steal signature earns exactly one respawn
+    stub.stop();
+  });
+
+  test('recovers when the first worker dies before readiness and the respawn binds', async () => {
+    // One readiness 503 so the poll loop observes the dead worker's exit
+    // (a 200-first stub would succeed before noticing the exit — see
+    // waitForReadiness's check-then-fetch ordering).
+    const stub = startStubWorker({ readinessFailures: 1 });
+    const item = makeItemDir('item-respawn', repoPath, pinnedCommit);
+    const deadWorker = fakeWorker({ exited: Promise.resolve(1) });
+    const liveWorker = fakeWorker();
+    const killed: WorkerHandle[] = [];
+    let spawns = 0;
+    const fork = await prepareFork(item, 'none', tempDir('runs-respawn'), {
+      runId: 'run-001',
+      port: stub.port,
+      spawnWorker: () => (++spawns === 1 ? deadWorker : liveWorker),
+      killTree: async (target) => {
+        killed.push(target);
+      },
+      readinessTimeoutMs: 5_000,
+    });
+    expect(spawns).toBe(2);
+    expect(killed[0]).toBe(deadWorker); // the dead first attempt was reaped
+    expect(fork.worker).toBe(liveWorker);
+    await teardownFork(fork, { keepData: false });
     stub.stop();
   });
 
@@ -531,6 +563,13 @@ describe('freePort', () => {
     expect(port).toBeGreaterThan(0);
     const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: () => new Response('') });
     server.stop(true);
+    releasePort(port);
+  });
+
+  test('issues distinct ports to concurrent callers until released', () => {
+    const ports = Array.from({ length: 8 }, () => freePort());
+    expect(new Set(ports).size).toBe(ports.length);
+    for (const port of ports) releasePort(port);
   });
 });
 
