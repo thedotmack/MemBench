@@ -64,6 +64,8 @@ id = "e2e-study"
 repetitions = 3
 candidate_models = ["candidate-a"]
 executor_lanes = ["lane-a"]
+primary_candidate = "candidate-a"
+primary_lane = "lane-a"
 item_ids = ["item-a", "item-b", "item-c"]
 corpus_path = "${runRoot}"
 [routes.observer]
@@ -86,6 +88,13 @@ allow_fallbacks = false
 schedule = "schedule-seed"
 bootstrap = "bootstrap-seed"
 audit = "audit-seed"
+[audit]
+sample_size = 1
+policy = "uniform_without_replacement"
+[observer_sampling]
+temperature = 0.0
+top_p = 1.0
+seed_identity = "observer-seed"
 [executor_sampling]
 temperature = 0.0
 top_p = 1.0
@@ -94,9 +103,21 @@ seed_identity = "e2e-seed"
 alpha = 0.05
 minimum_effect = 0.1
 maximum_schema_failure_rate = 0.05
+maximum_unknown_outcome_rate = 0.0
 minimum_calibrated_items = 3
+minimum_attribution_rate = 0.5
+minimum_drift_avoidance_rate = 0.5
+minimum_audit_agreement = 0.8
 bootstrap_samples = 500
 multiplicity = "bonferroni"
+[commitments]
+corpus_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+prompt_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+harness_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+judge_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+observer_event_universe_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+reference_control_universe_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+run_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 [budgets]
 observer_usd = 1.0
 executor_usd = 1.0
@@ -111,7 +132,7 @@ maximum_steps = 2
         const text = request.purpose === "observer"
           ? JSON.stringify({ schemaVersion: 1, memories: [{ id: "mode-fact", text: "Use amber mode.", metadata: { source: "synthetic" } }] })
           : JSON.stringify({ outcome: "pass", reason: "The configuration contains the requested mode." });
-        return { text, generationId: null, route: { requested: request.route, effective: { provider: null, model: null, routeReported: false } }, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.01 }, durationMs: 1, modelCalls: 1, steps: 1 };
+        return { text, generationId: null, route: { requested: request.route, effective: { provider: request.route.provider, model: request.route.model, routeReported: true } }, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.01 }, durationMs: 1, modelCalls: 1, steps: 1 };
       },
     };
     const memory = new InMemoryBackend();

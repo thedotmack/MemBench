@@ -5,6 +5,7 @@ import { deepFreeze, hashJson } from "./canonical";
 import type { RequestedRoute, Sha256 } from "./domain";
 import { requireSafeIdentifier } from "./identifiers";
 import { checkedProductWithin, SCIENTIFIC_LIMITS } from "./limits";
+import { requireFixedRoute } from "./runtime-validation";
 
 const parsedSpecBrand: unique symbol = Symbol("MemBench parsed experiment specification");
 const issuedSpecs = new WeakSet<object>();
@@ -17,6 +18,8 @@ export interface ExperimentSpec {
     readonly repetitions: number;
     readonly candidateModels: readonly string[];
     readonly executorLanes: readonly string[];
+    readonly primaryCandidate: string;
+    readonly primaryLane: string;
     readonly itemIds: readonly string[];
     readonly corpusPath: string;
   };
@@ -31,6 +34,15 @@ export interface ExperimentSpec {
     readonly bootstrap: string;
     readonly audit: string;
   };
+  readonly audit: {
+    readonly sampleSize: number;
+    readonly policy: "uniform_without_replacement";
+  };
+  readonly observerSampling: {
+    readonly temperature: number;
+    readonly topP: number;
+    readonly seedIdentity: string;
+  };
   readonly executorSampling: {
     readonly temperature: number;
     readonly topP: number;
@@ -40,9 +52,22 @@ export interface ExperimentSpec {
     readonly alpha: number;
     readonly minimumEffect: number;
     readonly maximumSchemaFailureRate: number;
+    readonly maximumUnknownOutcomeRate: 0;
     readonly minimumCalibratedItems: number;
+    readonly minimumAttributionRate: number;
+    readonly minimumDriftAvoidanceRate: number;
+    readonly minimumAuditAgreement: number;
     readonly bootstrapSamples: number;
     readonly multiplicity: "bonferroni";
+  };
+  readonly commitments: {
+    readonly corpusHash: Sha256;
+    readonly promptHash: Sha256;
+    readonly harnessHash: Sha256;
+    readonly judgeHash: Sha256;
+    readonly observerEventUniverseHash: Sha256;
+    readonly referenceControlUniverseHash: Sha256;
+    readonly runHash: Sha256;
   };
   readonly budgets: {
     readonly observerUsd: number;
@@ -85,6 +110,13 @@ function safeIdentifier(value: unknown, label: string): string {
   return requireSafeIdentifier(value, label);
 }
 
+function hashValue(value: unknown, label: string): Sha256 {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError(`${label} must be a sha256 commitment`);
+  }
+  return value as Sha256;
+}
+
 function numberValue(value: unknown, label: string, minimum = 0): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < minimum) {
     throw new TypeError(`${label} must be a finite number of at least ${minimum}`);
@@ -118,11 +150,11 @@ function route(value: unknown, label: string): RequestedRoute {
   if (source.allow_fallbacks) {
     throw new TypeError(`${label}.allow_fallbacks must be false for a scientific primary run`);
   }
-  return {
-    provider: stringValue(source.provider, `${label}.provider`),
-    model: stringValue(source.model, `${label}.model`),
+  return requireFixedRoute({
+    provider: source.provider as string,
+    model: source.model as string,
     allowFallbacks: source.allow_fallbacks,
-  };
+  });
 }
 
 function externalCorpusPath(value: unknown, repositoryRoot: string): string {
@@ -157,19 +189,22 @@ function externalCorpusPath(value: unknown, repositoryRoot: string): string {
 
 function identityPayload(spec: Omit<ExperimentSpec, "identityHash">): object {
   const { corpusPath: _hostLocalPath, ...portableExperiment } = spec.experiment;
+  const { commitments: _expectedArtifactCommitments, ...configuration } = spec;
   return {
-    version: spec.version,
+    version: configuration.version,
     experiment: portableExperiment,
-    routes: spec.routes,
-    seeds: spec.seeds,
-    executorSampling: spec.executorSampling,
-    decision: spec.decision,
-    budgets: spec.budgets,
+    routes: configuration.routes,
+    seeds: configuration.seeds,
+    audit: configuration.audit,
+    observerSampling: configuration.observerSampling,
+    executorSampling: configuration.executorSampling,
+    decision: configuration.decision,
+    budgets: configuration.budgets,
   };
 }
 
 export function assertExperimentSpecIdentity(spec: ExperimentSpec): void {
-  if (!issuedSpecs.has(spec) || !Object.isFrozen(spec) || !Object.isFrozen(spec.decision)) {
+  if (!issuedSpecs.has(spec) || !Object.isFrozen(spec) || !Object.isFrozen(spec.decision) || !Object.isFrozen(spec.audit)) {
     throw new TypeError("experiment specification must be parsed and frozen");
   }
   const { identityHash, ...payload } = spec;
@@ -186,16 +221,21 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
     throw new TypeError(`invalid TOML: ${error instanceof Error ? error.message : "parse failure"}`);
   }
   const root = table(parsed, "spec");
-  exactKeys(root, ["version", "experiment", "routes", "seeds", "executor_sampling", "decision", "budgets"], "spec");
+  exactKeys(root, ["version", "experiment", "routes", "seeds", "audit", "observer_sampling", "executor_sampling", "decision", "commitments", "budgets"], "spec");
   if (root.version !== 1) throw new TypeError("spec.version must equal 1");
 
   const experiment = table(root.experiment, "experiment");
-  exactKeys(experiment, ["id", "repetitions", "candidate_models", "executor_lanes", "item_ids", "corpus_path"], "experiment");
+  exactKeys(experiment, ["id", "repetitions", "candidate_models", "executor_lanes", "primary_candidate", "primary_lane", "item_ids", "corpus_path"], "experiment");
   const repetitions = integerValue(experiment.repetitions, "experiment.repetitions", 3, SCIENTIFIC_LIMITS.maximumRepetitions);
   const candidateModels = uniqueStrings(experiment.candidate_models, "experiment.candidate_models", 1, SCIENTIFIC_LIMITS.maximumCandidates)
     .map((value, index) => safeIdentifier(value, `experiment.candidate_models[${index}]`));
   const executorLanes = uniqueStrings(experiment.executor_lanes, "experiment.executor_lanes", 1, SCIENTIFIC_LIMITS.maximumLanes)
     .map((value, index) => safeIdentifier(value, `experiment.executor_lanes[${index}]`));
+  const primaryCandidate = safeIdentifier(experiment.primary_candidate, "experiment.primary_candidate");
+  const primaryLane = safeIdentifier(experiment.primary_lane, "experiment.primary_lane");
+  if (!candidateModels.includes(primaryCandidate) || !executorLanes.includes(primaryLane)) {
+    throw new TypeError("experiment primary comparison must be a declared candidate and lane pair");
+  }
   const itemIds = uniqueStrings(experiment.item_ids, "experiment.item_ids", 3, SCIENTIFIC_LIMITS.maximumItems)
     .map((value, index) => safeIdentifier(value, `experiment.item_ids[${index}]`));
 
@@ -204,6 +244,33 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
 
   const seeds = table(root.seeds, "seeds");
   exactKeys(seeds, ["schedule", "bootstrap", "audit"], "seeds");
+
+  const audit = table(root.audit, "audit");
+  exactKeys(audit, ["sample_size", "policy"], "audit");
+  const auditSampleSize = integerValue(
+    audit.sample_size,
+    "audit.sample_size",
+    1,
+    SCIENTIFIC_LIMITS.maximumAuditRows,
+  );
+  if (audit.policy !== "uniform_without_replacement") {
+    throw new TypeError("audit.policy must equal uniform_without_replacement");
+  }
+  const primaryAuditUniverseSize = checkedProductWithin(
+    [itemIds.length, repetitions],
+    SCIENTIFIC_LIMITS.maximumAuditRows,
+    "primary audit universe",
+  );
+  if (auditSampleSize > primaryAuditUniverseSize) {
+    throw new TypeError("audit.sample_size cannot exceed the primary audit universe");
+  }
+
+  const observerSampling = table(root.observer_sampling, "observer_sampling");
+  exactKeys(observerSampling, ["temperature", "top_p", "seed_identity"], "observer_sampling");
+  const observerTemperature = numberValue(observerSampling.temperature, "observer_sampling.temperature");
+  if (observerTemperature > 2) throw new TypeError("observer sampling temperature exceeds two");
+  const observerTopP = numberValue(observerSampling.top_p, "observer_sampling.top_p");
+  if (observerTopP > 1) throw new TypeError("observer sampling top_p exceeds one");
 
   const executorSampling = table(root.executor_sampling, "executor_sampling");
   exactKeys(executorSampling, ["temperature", "top_p", "seed_identity"], "executor_sampling");
@@ -215,7 +282,7 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
   const decision = table(root.decision, "decision");
   exactKeys(
     decision,
-    ["alpha", "minimum_effect", "maximum_schema_failure_rate", "minimum_calibrated_items", "bootstrap_samples", "multiplicity"],
+    ["alpha", "minimum_effect", "maximum_schema_failure_rate", "maximum_unknown_outcome_rate", "minimum_calibrated_items", "minimum_attribution_rate", "minimum_drift_avoidance_rate", "minimum_audit_agreement", "bootstrap_samples", "multiplicity"],
     "decision",
   );
   const alpha = numberValue(decision.alpha, "decision.alpha", SCIENTIFIC_LIMITS.minimumAlpha);
@@ -225,6 +292,13 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
     "decision.maximum_schema_failure_rate",
   );
   if (maximumSchemaFailureRate > 1) throw new TypeError("maximum schema failure rate cannot exceed one");
+  const maximumUnknownOutcomeRate = numberValue(
+    decision.maximum_unknown_outcome_rate,
+    "decision.maximum_unknown_outcome_rate",
+  );
+  if (maximumUnknownOutcomeRate !== 0) {
+    throw new TypeError("maximum unknown outcome rate must be zero for decision-bearing evidence");
+  }
   const minimumEffect = numberValue(
     decision.minimum_effect,
     "decision.minimum_effect",
@@ -240,12 +314,33 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
   if (minimumCalibratedItems > itemIds.length) {
     throw new TypeError("minimum calibrated items cannot exceed the predeclared item set");
   }
+  const minimumAttributionRate = numberValue(
+    decision.minimum_attribution_rate,
+    "decision.minimum_attribution_rate",
+    SCIENTIFIC_LIMITS.minimumAlpha,
+  );
+  const minimumDriftAvoidanceRate = numberValue(
+    decision.minimum_drift_avoidance_rate,
+    "decision.minimum_drift_avoidance_rate",
+    SCIENTIFIC_LIMITS.minimumAlpha,
+  );
+  const minimumAuditAgreement = numberValue(
+    decision.minimum_audit_agreement,
+    "decision.minimum_audit_agreement",
+    SCIENTIFIC_LIMITS.minimumAlpha,
+  );
+  if (minimumAttributionRate > 1 || minimumDriftAvoidanceRate > 1 || minimumAuditAgreement > 1) {
+    throw new TypeError("decision evidence rates cannot exceed one");
+  }
   if (decision.multiplicity !== "bonferroni") {
     throw new TypeError("decision.multiplicity must equal bonferroni");
   }
 
   const budgets = table(root.budgets, "budgets");
   exactKeys(budgets, ["observer_usd", "executor_usd", "judge_usd", "maximum_steps"], "budgets");
+
+  const commitments = table(root.commitments, "commitments");
+  exactKeys(commitments, ["corpus_hash", "prompt_hash", "harness_hash", "judge_hash", "observer_event_universe_hash", "reference_control_universe_hash", "run_hash"], "commitments");
 
   const resultWithoutHash = {
     version: 1 as const,
@@ -254,6 +349,8 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
       repetitions,
       candidateModels,
       executorLanes,
+      primaryCandidate,
+      primaryLane,
       itemIds,
       corpusPath: externalCorpusPath(experiment.corpus_path, options.repositoryRoot),
     },
@@ -268,6 +365,15 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
       bootstrap: stringValue(seeds.bootstrap, "seeds.bootstrap"),
       audit: stringValue(seeds.audit, "seeds.audit"),
     },
+    audit: {
+      sampleSize: auditSampleSize,
+      policy: "uniform_without_replacement" as const,
+    },
+    observerSampling: {
+      temperature: observerTemperature,
+      topP: observerTopP,
+      seedIdentity: stringValue(observerSampling.seed_identity, "observer_sampling.seed_identity", SCIENTIFIC_LIMITS.maximumSeedLength),
+    },
     executorSampling: {
       temperature: executorTemperature,
       topP: executorTopP,
@@ -277,7 +383,11 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
       alpha,
       minimumEffect,
       maximumSchemaFailureRate,
+      maximumUnknownOutcomeRate: 0 as const,
       minimumCalibratedItems,
+      minimumAttributionRate,
+      minimumDriftAvoidanceRate,
+      minimumAuditAgreement,
       bootstrapSamples: integerValue(
         decision.bootstrap_samples,
         "decision.bootstrap_samples",
@@ -285,6 +395,15 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
         SCIENTIFIC_LIMITS.maximumBootstrapSamples,
       ),
       multiplicity: "bonferroni" as const,
+    },
+    commitments: {
+      corpusHash: hashValue(commitments.corpus_hash, "commitments.corpus_hash"),
+      promptHash: hashValue(commitments.prompt_hash, "commitments.prompt_hash"),
+      harnessHash: hashValue(commitments.harness_hash, "commitments.harness_hash"),
+      judgeHash: hashValue(commitments.judge_hash, "commitments.judge_hash"),
+      observerEventUniverseHash: hashValue(commitments.observer_event_universe_hash, "commitments.observer_event_universe_hash"),
+      referenceControlUniverseHash: hashValue(commitments.reference_control_universe_hash, "commitments.reference_control_universe_hash"),
+      runHash: hashValue(commitments.run_hash, "commitments.run_hash"),
     },
     budgets: {
       observerUsd: numberValue(budgets.observer_usd, "budgets.observer_usd", SCIENTIFIC_LIMITS.minimumAlpha),

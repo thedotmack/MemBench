@@ -1,0 +1,41 @@
+# Reporting contract
+
+## Authority and cross-binding
+
+The report is a deterministic aggregate projection of one declared MemBench experiment. Its required-behavior, avoided-behavior, and outcome-measurement presentation borrows an easy-to-scan pattern from Ori Eval's public framing. MemBench does not claim Ori execution, API compatibility, or Ori-produced results.
+
+The constructor accepts exactly a parser-issued `ExperimentSpec`, its exact module-issued candidate × executor-lane comparison family, and an explicit experiment-bound independent-audit result or `null`. It recovers the observer batch and resolved artifact set from the execution that issued those comparisons; callers cannot substitute either one. The public comparison function accepts only a factory-issued execution batch—not attempt or calibration arrays. Callers cannot select the primary pair or provide identity hashes, decisions, headlines, thresholds, rates, intervals, costs, audit rows, or family rows.
+
+Private issuance commitments form one chain: parser-issued spec → resolved and issued artifacts → issued observer event/memory batch → issued scheduled execution batch → issued comparisons → issued reassessment → issued report. The artifact stage hashes the exact validated corpus documents/events, fixed protocols, routes/sampling, reference sources, schedule, and actual run manifest. TOML commitment values are expected pre-registration assertions; they are not part of the portable configuration hash and must exactly match this derived artifact set. The execution stage binds the exact schedule and manifest plus input, result, scored-attempt, calibration, and primary-reassessment-evidence universes. Observer batches bind the exact specification/artifact set, run, corpus, exact observer route, protocol prompt commitment, item/event universe, actual prompt-hash vector, record universe, and canonical per-item memory artifacts. Independent-reassessment evidence is derived only from execution-bound executor-response and tool-trace artifacts for the primary item × repetition universe; private primary outcomes are not present in the public evidence family. Audit manifests derive the specification's declared sample size, uniform-without-replacement policy, audit seed, route, protocol hashes, and deterministic judge configuration, then bind the exact comparison evidence commitment, candidate universe, selected-sample hash, and judge configuration. Structured clones, repeated runner-result objects, omitted rows, plain arrays, and Spec A→B substitution fail closed. After a restart these issued projections must be recomputed from validated persisted source evidence.
+
+## Prespecified primary and decision rule
+
+`experiment.primary_candidate` and `experiment.primary_lane` are immutable declared members of the comparison family. They select the JSON/Markdown headline; the caller cannot change them after observing results.
+
+The policy snapshot includes minimum floor effect, minimum calibrated items, maximum schema-failure rate, the required zero maximum unknown-outcome rate, minimum attribution rate, minimum drift-avoidance rate, minimum independent-reassessment agreement, nominal alpha, Bonferroni family size, and bootstrap samples. Recommendation requires all of those gates plus an active observer batch on its exact requested route, one measured effective route across every scored arm/item/repetition, within-budget observer/executor/judge/step evidence, and a measured experiment-bound reassessment at or above threshold. Any candidate unknown or missing audit/budget measurement is insufficient; explicit failures remain failures and unknowns are never silently recoded as failures. A measured attribution or drift shortfall, or below-threshold audit agreement, is do-not-recommend. Shuffled and reference intervals are diagnostic/descriptive and do not flip the decision.
+
+Every pair appears exactly once with its effective decision and reasons, `k = 1` exclusions, repetition instability, success/attribution/drift rates, tokens to done, nonexclusive categorized failures, paired counts, three complete intervals, cost breakdown, duration, and safe effective-route telemetry. Each interval carries estimate, bounds, item count, nominal and adjusted alpha, family size, bootstrap count, sample hash, and item inferential unit.
+
+## Cost and missingness
+
+The report never calls candidate-only spend a real total. Per-pair attempt-pipeline spend includes all candidate and control repetitions for all items, including excluded items. Family attempt spend sums every pair once. Independent k=1 calibration spend is added once per item–lane, and observer and audit spend are each added once per experiment.
+
+`total_experimental_spend` is measured only when every executed attempt-pipeline, calibration, observer, and audit component reports cost. A missing component makes the total null while the component breakdown remains visible. Budget evidence separately reports observer; executor plus calibration; judge plus audit; and steps. Missing measurement or overshoot prevents a recommendation, including a final-attempt overshoot that leaves the schedule complete. The same fail-closed missingness applies independently to duration, route, attribution, drift, tokens to done, and audit agreement.
+
+## Formats and escaping
+
+- `report.json` is newline-terminated canonical JSON and is the scientific record.
+- `report.md` is self-contained and carries the same measurements. Every interpolated Markdown table cell is escaped.
+- `report.junit.xml` is optional and emits one testcase for every prespecified pair. Recommend passes, do-not-recommend fails, and insufficient evidence skips. Therefore a favorable primary cannot hide a negative or invalid sibling pair. JUnit is an escaped CI projection, not the scientific record.
+
+Public effective provider/model labels use a strict ASCII grammar: safe alphanumeric segments with a small punctuation allowlist and at most one namespace slash. Local-path forms, path assignments, drive paths, Markdown/HTML metacharacters, controls, format characters, and bidi controls are rejected before rendering.
+
+## Identity, audit, and observer disclosure
+
+The report's corpus, prompt, harness, and judge identity components come from the resolved artifact set; route and configuration hashes come from the parser-issued specification. The run hash is the resolved run manifest's content hash, not a caller label. The report also discloses observer event/prompt/record/memory universe hashes, the route/sampling and reference-source artifact hashes, aggregate execution-stage commitments, observer route/status/counts, budget status and measurements, aggregate reassessment agreement, declared audit size/policy, audit manifest/configuration/universe/selected-sample hashes, and the lack of independent artifact time attestation. It never publishes event bodies, memory text, injected inputs, raw attempt arrays, raw prompts, row identifiers, or judge prose.
+
+## Public bundle and atomic publication
+
+The fixed-key manifest requires canonical JSON, Markdown, provenance, and attestation; JUnit presence must equal `includeJunit`. No extra filename is allowed. Every entry binds byte length and SHA-256. Public source references are unique approved HTTPS URLs, authority/review references are SHA-256 commitments, and narrative fields reject controls and path-shaped text.
+
+Publication requires an absolute non-existing destination beneath a real parent. The public API exposes no race hooks. Internally, MemBench creates a sibling staging directory, writes each regular file with exclusive/no-follow semantics, fsyncs, writes the manifest last, and rereads through descriptors. It rechecks parent and staging device/inode/type around every write, test hook, read, verification, and rename; every child must remain the same regular non-symlink file. Immediately after rename, the destination must be the expected directory inode with the exact verified file set. Parent/staging replacement, child symlinks, destination races, and post-rename identity changes fail closed. Cleanup removes only a still-matching staging identity and never follows a substituted path.

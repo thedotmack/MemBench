@@ -18,7 +18,19 @@ import {
   type WorkspaceDiff,
   writeWorkspaceFile,
 } from "./sandbox";
-import { boundedInteger, finiteNonnegative, nonemptyText, reportedCost, reportedInteger, requireFixedRoute, RUNTIME_LIMITS } from "./runtime-validation";
+import {
+  boundedInteger,
+  finiteNonnegative,
+  nonemptyText,
+  reportedCost,
+  reportedInteger,
+  requireFixedRoute,
+  RUNTIME_LIMITS,
+  runtimeTelemetryId,
+  validateNullableDuration,
+  validateReportedUsage,
+  validateRouteProvenance,
+} from "./runtime-validation";
 
 export interface ExecutorToolbox {
   read(path: string): string;
@@ -50,6 +62,31 @@ export interface ExecutorTransportResult {
 
 export interface ExecutorTransport {
   run(request: ExecutorTransportRequest): Promise<ExecutorTransportResult>;
+}
+
+export function validateExecutorTransportResult(value: unknown, expectedRoute: RequestedRoute): ExecutorTransportResult {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new TypeError("executor transport result must be an object");
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  if (prototype !== Object.prototype && prototype !== null) throw new TypeError("executor transport result must be an ordinary object");
+  const source = value as Record<string, unknown>;
+  const keys = ["completed", "generationId", "route", "usage", "durationMs", "steps", "modelCalls"] as const;
+  if (
+    Reflect.ownKeys(source).length !== keys.length || keys.some((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(source, key);
+      return !descriptor?.enumerable || !("value" in descriptor) || descriptor.value === undefined;
+    }) ||
+    Reflect.ownKeys(source).some((key) => typeof key !== "string" || !keys.includes(key as typeof keys[number]))
+  ) throw new TypeError("executor transport result has invalid or missing fields");
+  if (typeof source.completed !== "boolean") throw new TypeError("executor completion must be boolean");
+  return deepFreeze({
+    completed: source.completed,
+    generationId: source.generationId === null ? null : runtimeTelemetryId(source.generationId, "executor generation id"),
+    route: validateRouteProvenance(source.route, expectedRoute),
+    usage: validateReportedUsage(source.usage, "executor transport usage"),
+    durationMs: validateNullableDuration(source.durationMs, "executor transport duration"),
+    steps: boundedInteger(source.steps, "executor step count", Number.MAX_SAFE_INTEGER),
+    modelCalls: boundedInteger(source.modelCalls, "executor model call count", Number.MAX_SAFE_INTEGER),
+  });
 }
 
 export interface ExecutorAttemptPolicy {
@@ -84,20 +121,25 @@ function requireExecutorPolicy(policy: ExecutorAttemptPolicy): ExecutorAttemptPo
   return policy;
 }
 
-function addReportedUsage(total: ReportedUsage, usage: PostModelCallPayload["usage"]): ReportedUsage {
-  if (!usage) return { inputTokens: null, outputTokens: null, totalTokens: null, costUsd: null };
+function addReportedUsage(total: ReportedUsage, usage: unknown): ReportedUsage {
+  if (usage === undefined || usage === null) return { inputTokens: null, outputTokens: null, totalTokens: null, costUsd: null };
+  if (typeof usage !== "object" || Array.isArray(usage)) throw new TypeError("SDK usage must be an object or missing");
+  const source = usage as Record<string, unknown>;
   const sum = (left: number | null, right: unknown, integer: boolean): number | null => {
     if (left === null) return null;
+    if (right === undefined || right === null) return null;
     const valid = integer ? reportedInteger(right) : reportedCost(right);
-    if (valid === null) return null;
+    if (valid === null) throw new TypeError("SDK usage contains an invalid reported measurement");
     const combined = left + valid;
-    return integer ? reportedInteger(combined) : reportedCost(combined);
+    const validated = integer ? reportedInteger(combined) : reportedCost(combined);
+    if (validated === null) throw new RangeError("SDK usage aggregate exceeds scientific limits");
+    return validated;
   };
   return {
-    inputTokens: sum(total.inputTokens, usage.inputTokens, true),
-    outputTokens: sum(total.outputTokens, usage.outputTokens, true),
-    totalTokens: sum(total.totalTokens, usage.totalTokens, true),
-    costUsd: sum(total.costUsd, usage.cost, false),
+    inputTokens: sum(total.inputTokens, source.inputTokens, true),
+    outputTokens: sum(total.outputTokens, source.outputTokens, true),
+    totalTokens: sum(total.totalTokens, source.totalTokens, true),
+    costUsd: sum(total.costUsd, source.cost, false),
   };
 }
 
@@ -163,27 +205,26 @@ export class AgentSdkExecutorTransport implements ExecutorTransport {
     let aggregate: ReportedUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
     for (const call of calls) aggregate = addReportedUsage(aggregate, call.usage);
     if (calls.length === 0) {
-      aggregate = {
-        inputTokens: reportedInteger(response.usage?.inputTokens),
-        outputTokens: reportedInteger(response.usage?.outputTokens),
-        totalTokens: reportedInteger(response.usage?.totalTokens),
-        costUsd: reportedCost(response.usage?.cost),
-      };
+      aggregate = addReportedUsage(aggregate, response.usage);
     }
-    const durationValues = calls.map((call) => call.durationMs).filter((value) => Number.isFinite(value) && value >= 0);
-    const durationMs = durationValues.length === 0 ? null : durationValues.reduce((sum, value) => sum + value, 0);
-    return deepFreeze({
+    const durationValues = calls.map((call) => call.durationMs);
+    const durationMs = durationValues.length === 0 || durationValues.some((value) => value === undefined || value === null)
+      ? null
+      : durationValues.reduce((sum, value) => sum + (validateNullableDuration(value, "SDK executor duration") as number), 0);
+    return validateExecutorTransportResult({
       completed: response.status === "completed",
-      generationId: typeof response.id === "string" && response.id !== "" ? response.id : calls.at(-1)?.responseId ?? null,
+      generationId: response.id ?? calls.at(-1)?.responseId ?? null,
       route: {
         requested: route,
-        effective: { provider: null, model: typeof response.model === "string" && response.model !== "" ? response.model : calls.at(-1)?.model ?? null, routeReported: Boolean(response.model || calls.at(-1)?.model) },
+        // The SDK does not expose the selected provider. Do not publish a
+        // scientifically ambiguous half-route from model-only telemetry.
+        effective: { provider: null, model: null, routeReported: false },
       },
       usage: aggregate,
       durationMs,
       steps: Math.max(1, calls.length),
       modelCalls: Math.max(1, calls.length),
-    });
+    }, route);
   }
 }
 
@@ -238,7 +279,7 @@ export async function executeCodingAttempt(input: {
   const { tools, cleanupState } = toolbox(input.workspace, input.sandbox);
   let cleanup = false;
   try {
-    const execution = await input.transport.run({
+    const execution = validateExecutorTransportResult(await input.transport.run({
       route: policy.route,
       prompt: input.prompt,
       injectedMemory: input.injectedMemory,
@@ -246,7 +287,7 @@ export async function executeCodingAttempt(input: {
       maximumCostUsd: policy.maximumCostUsd,
       sampling: policy.sampling,
       tools,
-    });
+    }), policy.route);
     const mechanical = await input.sandbox.execute({
       argv: input.mechanicalCheck.argv,
       cwd: input.workspace.work,

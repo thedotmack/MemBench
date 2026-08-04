@@ -192,6 +192,29 @@ describe("background observer", () => {
     expect(await memory.list()).toHaveLength(0);
   });
 
+  test("injected observer transport telemetry rejects invalid measurements, identifiers, and routes", async () => {
+    const text = JSON.stringify({ schemaVersion: 1, memories: [] });
+    const malformed: readonly [string, ModelTransportResult][] = [
+      ["cost", result(text, { usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: -0.01 } })],
+      ["duration", result(text, { durationMs: -1 })],
+      ["input tokens", result(text, { usage: { inputTokens: -1, outputTokens: 1, totalTokens: 0, costUsd: 0 } })],
+      ["requested provider", result(text, { route: { requested: { ...route, provider: "../unsafe" }, effective: { provider: null, model: null, routeReported: false } } })],
+      ["requested model", result(text, { route: { requested: { ...route, model: "file:/etc" }, effective: { provider: null, model: null, routeReported: false } } })],
+      ["dispatched route", result(text, { route: { requested: { ...route, model: "different-model" }, effective: { provider: null, model: null, routeReported: false } } })],
+      ["route reporting", result(text, { route: { requested: route, effective: { provider: null, model: null, routeReported: true } } })],
+      ["route reporting", result(text, { route: { requested: route, effective: { provider: "provider-a", model: null, routeReported: true } } })],
+      ["generation id", result(text, { generationId: "../../unsafe" })],
+      ["model call count", result(text, { modelCalls: null as unknown as number })],
+      ["missing fields", result(text, { modelCalls: undefined as unknown as number })],
+    ];
+    for (const [message, injected] of malformed) {
+      const memory = new InMemoryBackend();
+      const transport: ModelTransport = { call: async () => injected };
+      await expect(observeInBackground({ events: [], route, transport, memory, sampling })).rejects.toThrow(message);
+      expect(await memory.list()).toHaveLength(0);
+    }
+  });
+
   test("Agent SDK transport pins provider and disables fallbacks without network", async () => {
     let captured: Record<string, unknown> | null = null;
     const fake = {
@@ -211,7 +234,7 @@ describe("background observer", () => {
     expect((captured! as { topP: unknown }).topP).toBe(1);
     expect(Object.hasOwn(captured!, "seed")).toBe(false);
     expect(output.usage.costUsd).toBe(0.01);
-    expect(output.route.effective.provider).toBeNull();
+    expect(output.route.effective).toEqual({ provider: null, model: null, routeReported: false });
   });
 
   test("model dispatch validates route and sampling while seed remains bound to identity", async () => {
@@ -220,6 +243,7 @@ describe("background observer", () => {
     const request: ModelTransportRequest = { purpose: "observer", route, instructions: "Instruction", input: "Input", maximumOutputTokens: 50, sampling };
     expect(promptHash(request)).not.toBe(promptHash({ ...request, sampling: { ...sampling, seed: "different-seed" } }));
     await expect(transport.call({ ...request, route: { provider: "", model: "model-a", allowFallbacks: false } })).rejects.toThrow();
+    await expect(transport.call({ ...request, route: { provider: "provider-a", model: "file:/etc", allowFallbacks: false } })).rejects.toThrow("requested model");
     await expect(transport.call({ ...request, sampling: { ...sampling, temperature: Number.NaN } })).rejects.toThrow();
     await expect(transport.call({ ...request, sampling: { ...sampling, topP: 2 } })).rejects.toThrow();
     await expect(transport.call({ ...request, sampling: { ...sampling, seed: "" } })).rejects.toThrow();

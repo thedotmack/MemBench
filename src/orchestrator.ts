@@ -251,14 +251,14 @@ function nextTimestamp(input: () => string, label: string, minimum: number): str
 
 export interface OrchestratorResult { readonly rows: readonly RuntimeJournalRow[]; readonly spend: RuntimeSpend; readonly steps: number; readonly stoppedReason: "complete" | "budget_exhausted" | "budget_measurement_missing" }
 
-function stopFrom(spend: RuntimeSpend, steps: number, budgets: RuntimeBudgets, allFinal: boolean): OrchestratorResult["stoppedReason"] {
+function stopFrom(spend: RuntimeSpend, steps: number, budgets: RuntimeBudgets, allFinal: boolean, continueOnMissingTelemetry: boolean): OrchestratorResult["stoppedReason"] {
   const current = flags(spend, steps, budgets);
-  if (current.measurementMissing) return "budget_measurement_missing";
+  if (current.measurementMissing && !(continueOnMissingTelemetry && allFinal)) return "budget_measurement_missing";
   if (current.observer || current.executor || current.judge || current.steps) return "budget_exhausted";
   return allFinal ? "complete" : "budget_exhausted";
 }
 
-export async function runResumableExperiment(input: { readonly manifest: RunManifest; readonly store: RuntimeStore; readonly budgets: RuntimeBudgets; readonly worker: AttemptWorker; readonly now: () => string }): Promise<OrchestratorResult> {
+export async function runResumableExperiment(input: { readonly manifest: RunManifest; readonly store: RuntimeStore; readonly budgets: RuntimeBudgets; readonly worker: AttemptWorker; readonly now: () => string; readonly continueOnMissingTelemetry?: boolean }): Promise<OrchestratorResult> {
   const manifest = parseRunManifest(input.manifest);
   const budgets = validateBudgets(input.budgets);
   const storedManifest = await input.store.loadManifest();
@@ -280,7 +280,7 @@ export async function runResumableExperiment(input: { readonly manifest: RunMani
   for (const entry of manifest.entries) {
     if (journal.terminalIds.has(entry.attemptId)) continue;
     const before = flags(journal.spend, journal.steps, budgets);
-    if (before.measurementMissing) { forcedStop = "budget_measurement_missing"; break; }
+    if (before.measurementMissing && input.continueOnMissingTelemetry !== true) { forcedStop = "budget_measurement_missing"; break; }
     if (before.observer || before.executor || before.judge || before.steps || journal.spend.observerUsd! >= budgets.observerUsd || journal.spend.executorUsd! >= budgets.executorUsd || journal.spend.judgeUsd! >= budgets.judgeUsd || journal.steps >= budgets.maximumSteps) { forcedStop = "budget_exhausted"; break; }
     if (!journal.lifecycle.has(entry.attemptId)) {
       const minimum = Date.parse(rows.at(-1)?.recordedAt ?? manifest.createdAt);
@@ -311,12 +311,12 @@ export async function runResumableExperiment(input: { readonly manifest: RunMani
     }
     journal = validatePersistedRows(manifest, rows, budgets);
     const post = flags(journal.spend, journal.steps, budgets);
-    if (post.measurementMissing) forcedStop = "budget_measurement_missing";
+    if (post.measurementMissing && input.continueOnMissingTelemetry !== true) forcedStop = "budget_measurement_missing";
     else if (post.observer || post.executor || post.judge || post.steps) forcedStop = "budget_exhausted";
     if (forcedStop) break;
   }
   const allFinal = journal.terminalIds.size === manifest.entries.length;
-  return deepFreeze({ rows, spend: journal.spend, steps: journal.steps, stoppedReason: forcedStop ?? stopFrom(journal.spend, journal.steps, budgets, allFinal) });
+  return deepFreeze({ rows, spend: journal.spend, steps: journal.steps, stoppedReason: forcedStop ?? stopFrom(journal.spend, journal.steps, budgets, allFinal, input.continueOnMissingTelemetry === true) });
 }
 
 export function reportedUsageSpend(usage: ReportedUsage): number | null { return usage.costUsd; }

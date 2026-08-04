@@ -22,6 +22,22 @@ from `invalid_schema`; persistence interruption is also reported separately.
 Only transport envelopes are byte-bounded: raw model responses and HTTP
 bodies retain independent UTF-8 byte caps.
 
+Scientific reporting does not accept a bag of individually issued observation
+records. `observeExperimentInBackground` requires exactly one unique event
+batch per prespecified item, contiguous event indexes, and the committed event
+universe before dispatch. The event batches must equal the corpus events in the
+same issued artifact set; the observer route and sampling must also equal that
+set. Its issued aggregate binds the exact spec/run,
+resolved corpus and prompt-protocol commitments, requested and effective observer routes, actual
+prompt-hash vector, record universe, one canonical memory artifact per item,
+memory universe, and contagious spend/duration. The execution issuer privately
+retrieves those exact per-item artifacts; public reports expose only aggregate
+commitments, never memory text. A missing or mismatched effective observer route
+fails the observer. Once observer spend is missing or over budget, later items
+are represented by issued `not_run_budget` records without another model call,
+so the exact declared item universe remains visible. Clones,
+duplicates, and cross-experiment batches are rejected.
+
 The OpenRouter integration is pinned to `@openrouter/agent` 0.8.0. Its model
 adapter uses `OpenRouter.callModel`, `ModelResult.getResponse`,
 `stepCountIs`, `maxCost`, fixed `tool` definitions, and `PostModelCall` hooks.
@@ -91,6 +107,17 @@ NULs, and per-stream plus aggregate byte limits are checked before use.
 
 ## Calibration, audit, and resume
 
+`runExperimentEvidence` derives one complete schedule and manifest and submits
+every candidate, control, item, lane, and repetition through the orchestrator.
+The attempt runner receives a factory-derived input: same-item observer memory
+for `candidate`, empty text for `none`, a deterministic donor's observer memory
+for `shuffled`, or the exact bound reference for `reference`. Returned attempt
+and calibration values must be exact ordinary objects with strict finite,
+non-negative telemetry. Reusing one returned object for another scheduled
+coordinate fails closed. All four arms must resolve to one effective route for
+the pair. Only the resulting issued execution batch can enter public comparison
+and reporting.
+
 Calibration uses one independent floor attempt and one independent frozen
 reference attempt per item and lane. Their attempt identities cannot overlap
 the scored schedule. Floor must fail and reference must pass. Exclusions are
@@ -103,15 +130,25 @@ lane, source hash, facts, and exact injected text it commits to. Cloned or
 deserialized controls and items are rejected; after restart the corpus must be
 validated and the reference control compiled again.
 
-The audit sample is selected from a canonical eligible evidence universe with
-the predeclared audit seed before independent judgments run. The manifest
+The audit sample size and uniform-without-replacement policy are declared in
+TOML. The audit universe is derived from the issued primary item × repetition
+execution results; no public audit API accepts alternate source rows. The sample
+is selected with the specification's predeclared audit seed before independent judgments run. The manifest
 separately commits to every eligible row and evidence hash and to every primary
 row and outcome hash, with distinct universe hashes. It also binds sample size,
 raw seed and seed hash, requested provider and model with fallback disabled,
 prompt and schema hashes, and the independent judge sampling and seed identity.
-The independent judge sees only the row id, blinded evidence, and its bound
-configuration—never the primary outcome. Candidate substitution, duplicate
-ids, and configuration drift fail closed. Invalid or unavailable audit
+The independent judge sees only the row id, derived reassessment view, and its bound
+configuration—never the private primary outcome. The view is structurally limited
+to runner-supplied executor-response and tool-trace artifacts and forbids outcome,
+attribution, and drift judgment keys and direct values. Those artifacts lack
+independent temporal attestation, so the report declares an independent-reassessment
+limitation rather than claiming blinding. The audit route, protocol hashes, and
+zero-temperature sampling identity are derived from the immutable specification.
+An experiment-bound audit also binds
+the exact parser-issued spec and issued comparison evidence-universe
+commitment. Generic audit results, candidate substitution, duplicate ids,
+seed/judge drift, and cross-experiment use fail closed. Invalid or unavailable audit
 judgments remain unknown; agreement excludes unknown pairs and reports its
 denominator.
 
@@ -126,10 +163,15 @@ Attempts settle sequentially so one failure cannot discard other rows.
 Observer, executor, and judge spend remain separate. A model call may exceed a
 cost or step threshold because Agent SDK stop conditions are evaluated after a
 step; the terminal row records that overshoot and prevents another attempt.
-Missing spend is not treated as zero: it stops further budgeted execution with
-an explicit measurement-missing reason, including when the missing measurement
-or overshoot occurs on the final scheduled row. An ordinary worker exception
-records all spend as unknown; only a typed, fully measured failure can continue.
+Missing spend is never treated as zero. The generic resumable orchestrator stops
+on missing spend by default. The experiment evidence issuer opts into completing
+the already-prespecified scored schedule with contagious null spend, preventing
+missing telemetry from selectively removing later coordinates; its report then
+marks the relevant budget `measurement_unknown` and cannot recommend. A measured
+overshoot stops later work; when it first appears on the final scheduled row,
+the complete run remains reportable as over budget. An ordinary worker exception
+records all spend as unknown and interrupts the exact evidence schedule; only a
+typed, fully measured attempt failure can settle and continue.
 
 Journal decoding validates exact primitive runtime types before lifecycle
 logic: sequence, repetition, steps, measurements, outcomes, reasons, and flags

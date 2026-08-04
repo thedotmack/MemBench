@@ -3,9 +3,14 @@ import { snapshotIssuedReferenceControl, type ReferenceControl } from "./control
 import { assertCorpusItemIdentity, type CorpusItem } from "./corpus";
 import { assessCalibration, laneId, type CalibrationEvidence, type LaneId, type Outcome, type Sha256 } from "./domain";
 import { requireSafeIdentifier } from "./identifiers";
+import { SCIENTIFIC_LIMITS } from "./limits";
 import { utf8Text } from "./runtime-validation";
 
-export interface CalibrationRunResult { readonly attemptId: string; readonly outcome: Outcome }
+export interface CalibrationRunResult {
+  readonly attemptId: string;
+  readonly outcome: Outcome;
+  readonly reportedCostUsd?: number | null;
+}
 export interface CalibrationExecutor { run(input: { readonly attemptId: string; readonly injectionText: string }): Promise<CalibrationRunResult> }
 
 export interface BoundCalibrationReference {
@@ -17,6 +22,18 @@ export interface BoundCalibrationReference {
 }
 
 const issuedReferences = new WeakSet<object>();
+
+export function assertBoundCalibrationReference(reference: BoundCalibrationReference): void {
+  if (
+    !issuedReferences.has(reference) || !Object.isFrozen(reference) ||
+    reference.bindingHash !== hashJson({
+      itemId: reference.itemId,
+      laneId: reference.laneId,
+      sourceHash: reference.sourceHash,
+      control: reference.control,
+    })
+  ) throw new Error("calibration reference must be factory-issued and unchanged");
+}
 
 export function bindCalibrationReference(input: {
   readonly item: CorpusItem;
@@ -45,11 +62,44 @@ export interface CalibrationResult {
   readonly frozenReferenceHash: Sha256;
 }
 
+export function reconcileCalibrationEvidence(
+  evidence: CalibrationEvidence,
+  scoredControls: readonly { readonly arm: "none" | "reference"; readonly outcome: Outcome }[],
+): CalibrationEvidence {
+  if (!Array.isArray(scoredControls) || scoredControls.length === 0) throw new TypeError("scored controls are required for calibration reconciliation");
+  let contradiction = false;
+  for (const row of scoredControls) {
+    if (
+      row === null || typeof row !== "object" || Array.isArray(row) || Object.keys(row).length !== 2 ||
+      (row.arm !== "none" && row.arm !== "reference") ||
+      !new Set<unknown>(["pass", "fail", "unknown"]).has(row.outcome)
+    ) throw new TypeError("scored control outcome is invalid");
+    const calibrated = row.arm === "none" ? evidence.floorOutcome : evidence.referenceOutcome;
+    if (calibrated !== "unknown" && row.outcome !== "unknown" && row.outcome !== calibrated) contradiction = true;
+  }
+  return contradiction
+    ? deepFreeze({ ...evidence, eligible: false, reason: "calibration_instability" as const })
+    : evidence;
+}
+
 function validateRunResult(value: CalibrationRunResult, expectedId: string): CalibrationRunResult {
   const source = value as unknown as Record<string, unknown>;
-  if (value === null || typeof value !== "object" || Object.keys(source).length !== 2 || source.attemptId !== expectedId ||
-    !new Set<unknown>(["pass", "fail", "unknown"]).has(source.outcome)) throw new Error("calibration executor returned an invalid row");
-  return deepFreeze({ attemptId: expectedId, outcome: source.outcome as Outcome });
+  const keys = Object.keys(source).sort();
+  const hasCost = Object.hasOwn(source, "reportedCostUsd");
+  const validKeys = hasCost
+    ? ["attemptId", "outcome", "reportedCostUsd"]
+    : ["attemptId", "outcome"];
+  const reportedCostUsd = hasCost ? source.reportedCostUsd : null;
+  if (
+    value === null || typeof value !== "object" ||
+    keys.length !== validKeys.length || keys.some((key, index) => key !== validKeys[index]) ||
+    source.attemptId !== expectedId || !new Set<unknown>(["pass", "fail", "unknown"]).has(source.outcome) ||
+    (reportedCostUsd !== null && (
+      typeof reportedCostUsd !== "number" || !Number.isFinite(reportedCostUsd) ||
+      reportedCostUsd < 0 || reportedCostUsd > SCIENTIFIC_LIMITS.maximumBudgetUsd
+    ))
+  ) throw new Error("calibration executor returned an invalid row");
+  return deepFreeze({ attemptId: expectedId, outcome: source.outcome as Outcome, reportedCostUsd: reportedCostUsd as number | null });
 }
 
 function validateScoredRow(value: CalibrationRunResult): CalibrationRunResult {
@@ -68,12 +118,7 @@ export async function calibrateIndependentK1(input: {
   readonly scoredRows: readonly CalibrationRunResult[];
   readonly scoredControlOutcomes?: readonly { readonly arm: "none" | "reference"; readonly outcome: Outcome }[];
 }): Promise<CalibrationResult> {
-  if (!issuedReferences.has(input.reference) || input.reference.bindingHash !== hashJson({
-    itemId: input.reference.itemId,
-    laneId: input.reference.laneId,
-    sourceHash: input.reference.sourceHash,
-    control: input.reference.control,
-  })) throw new Error("calibration reference must be factory-issued and unchanged");
+  assertBoundCalibrationReference(input.reference);
   const exclusions = (input.exclusions ?? []).map((reason) => utf8Text(reason, "calibration exclusion", 500, true));
   if (new Set(exclusions).size !== exclusions.length) throw new TypeError("calibration exclusions must be unique");
   const frozenReferenceHash = hashJson(input.reference);
@@ -95,7 +140,20 @@ export async function calibrateIndependentK1(input: {
   const floor = validateRunResult(rawFloor, ids.none);
   const reference = validateRunResult(rawReference, ids.reference);
   if (hashJson(input.reference) !== frozenReferenceHash) throw new Error("reference changed during calibration");
-  const evidence = assessCalibration(input.reference.itemId, input.reference.laneId, floor.outcome, reference.outcome);
+  const reportedCostUsd = floor.reportedCostUsd === null || reference.reportedCostUsd === null ||
+    floor.reportedCostUsd === undefined || reference.reportedCostUsd === undefined
+    ? null
+    : floor.reportedCostUsd + reference.reportedCostUsd;
+  if (reportedCostUsd !== null && reportedCostUsd > SCIENTIFIC_LIMITS.maximumBudgetUsd) {
+    throw new RangeError("calibration reported cost exceeds the experiment budget bound");
+  }
+  const evidence = assessCalibration(
+    input.reference.itemId,
+    input.reference.laneId,
+    floor.outcome,
+    reference.outcome,
+    reportedCostUsd,
+  );
   const controlRows = input.scoredControlOutcomes ?? [];
   if (new Set(controlRows.map((row) => row.arm)).size !== controlRows.length) throw new TypeError("scored control arms must be unique");
   const contradiction = controlRows.some((row) => {

@@ -6,6 +6,7 @@ import { dirname, join, parse as parsePath } from "node:path";
 import { assertExperimentSpecIdentity, executorAttemptPolicyFromSpec, parseExperimentSpec, type ExperimentSpec } from "../src";
 
 const repositoryRoot = process.cwd();
+const commitment = `sha256:${"0".repeat(64)}`;
 const externalCorpusDirectory = mkdtempSync(join(tmpdir(), "membench-spec-corpus."));
 const secondCorpusDirectory = mkdtempSync(join(tmpdir(), "membench-spec-second."));
 afterAll(() => {
@@ -22,6 +23,8 @@ id = "synthetic-study"
 repetitions = 3
 candidate_models = ["candidate-a", "candidate-b"]
 executor_lanes = ["executor-a"]
+primary_candidate = "candidate-a"
+primary_lane = "executor-a"
 item_ids = ["item-a", "item-b", "item-c"]
 corpus_path = "${externalCorpusDirectory}"
 
@@ -50,6 +53,15 @@ schedule = "schedule-seed"
 bootstrap = "bootstrap-seed"
 audit = "audit-seed"
 
+[audit]
+sample_size = 2
+policy = "uniform_without_replacement"
+
+[observer_sampling]
+temperature = 0.0
+top_p = 1.0
+seed_identity = "observer-seed"
+
 [executor_sampling]
 temperature = 0.0
 top_p = 1.0
@@ -59,9 +71,22 @@ seed_identity = "executor-seed"
 alpha = 0.05
 minimum_effect = 0.1
 maximum_schema_failure_rate = 0.05
+maximum_unknown_outcome_rate = 0.0
 minimum_calibrated_items = 3
+minimum_attribution_rate = 0.5
+minimum_drift_avoidance_rate = 0.5
+minimum_audit_agreement = 0.8
 bootstrap_samples = 500
 multiplicity = "bonferroni"
+
+[commitments]
+corpus_hash = "${commitment}"
+prompt_hash = "${commitment}"
+harness_hash = "${commitment}"
+judge_hash = "${commitment}"
+observer_event_universe_hash = "${commitment}"
+reference_control_universe_hash = "${commitment}"
+run_hash = "${commitment}"
 
 [budgets]
 observer_usd = 1.0
@@ -77,6 +102,7 @@ describe("strict experiment specification", () => {
     expect(parsed.experiment.repetitions).toBe(3);
     expect(parsed.routes.observer.allowFallbacks).toBeFalse();
     expect(parsed.decision.multiplicity).toBe("bonferroni");
+    expect(parsed.audit).toEqual({ sampleSize: 2, policy: "uniform_without_replacement" });
     expect(parsed.executorSampling).toEqual({ temperature: 0, topP: 1, seedIdentity: "executor-seed" });
     expect(parsed.identityHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(Object.isFrozen(parsed)).toBeTrue();
@@ -87,6 +113,38 @@ describe("strict experiment specification", () => {
     const first = parseExperimentSpec(spec(), { repositoryRoot });
     const second = parseExperimentSpec(spec().replace("minimum_effect = 0.1", "minimum_effect = 0.2"), { repositoryRoot });
     expect(first.identityHash).not.toBe(second.identityHash);
+    expect(first.decision.maximumUnknownOutcomeRate).toBe(0);
+    expect(() => parseExperimentSpec(spec().replace("maximum_unknown_outcome_rate = 0.0", "maximum_unknown_outcome_rate = 0.01"), { repositoryRoot })).toThrow("must be zero");
+    expect(() => parseExperimentSpec(spec().replace("maximum_unknown_outcome_rate = 0.0\n", ""), { repositoryRoot })).toThrow("missing key: maximum_unknown_outcome_rate");
+  });
+
+  test("declarative expected artifact hashes cannot mint a second configuration identity", () => {
+    const first = parseExperimentSpec(spec(), { repositoryRoot });
+    const changed = parseExperimentSpec(spec().replace(
+      `corpus_hash = "${commitment}"`,
+      `corpus_hash = "sha256:${"1".repeat(64)}"`,
+    ), { repositoryRoot });
+    expect(changed.identityHash).toBe(first.identityHash);
+    expect(changed.commitments.corpusHash).not.toBe(first.commitments.corpusHash);
+  });
+
+  test("audit size and policy are strict prespecified experiment identity", () => {
+    const first = parseExperimentSpec(spec(), { repositoryRoot });
+    const second = parseExperimentSpec(spec().replace("sample_size = 2", "sample_size = 3"), { repositoryRoot });
+    expect(first.identityHash).not.toBe(second.identityHash);
+    expect(() => parseExperimentSpec(spec().replace("sample_size = 2", "sample_size = 10"), { repositoryRoot })).toThrow("cannot exceed");
+    expect(() => parseExperimentSpec(spec().replace("sample_size = 2", "sample_size = 0"), { repositoryRoot })).toThrow("at least 1");
+    expect(() => parseExperimentSpec(spec().replace("uniform_without_replacement", "caller_selected"), { repositoryRoot })).toThrow("must equal");
+    expect(() => parseExperimentSpec(spec().replace("sample_size = 2\n", ""), { repositoryRoot })).toThrow("missing key: sample_size");
+  });
+
+  test("primary candidate and lane are exact immutable members of experiment identity", () => {
+    const first = parseExperimentSpec(spec(), { repositoryRoot });
+    const second = parseExperimentSpec(spec().replace('primary_candidate = "candidate-a"', 'primary_candidate = "candidate-b"'), { repositoryRoot });
+    expect(first.experiment.primaryCandidate).toBe("candidate-a");
+    expect(first.identityHash).not.toBe(second.identityHash);
+    expect(() => parseExperimentSpec(spec().replace('primary_candidate = "candidate-a"', 'primary_candidate = "missing-candidate"'), { repositoryRoot })).toThrow("declared candidate and lane");
+    expect(() => parseExperimentSpec(spec().replace('primary_lane = "executor-a"', 'primary_lane = "missing-lane"'), { repositoryRoot })).toThrow("declared candidate and lane");
   });
 
   test("executor sampling is strict, frozen, and bound to experiment identity", () => {
@@ -153,6 +211,17 @@ describe("strict experiment specification", () => {
     expect(() => parseExperimentSpec(spec().replace("judge_usd = 1.0", ""), { repositoryRoot })).toThrow("missing key: judge_usd");
   });
 
+  test("route values use the runtime-safe grammar at parse time", () => {
+    for (const provider of ["file:", "/etc", "owner/provider", "<provider>", "provider\u202ename"]) {
+      const malformed = spec().replace('provider = "example-provider"', `provider = "${provider}"`);
+      expect(() => parseExperimentSpec(malformed, { repositoryRoot })).toThrow("requested provider");
+    }
+    for (const model of ["file:/etc", "/etc", "owner/model/extra", "owner/../model", "<model>", "model\u2066name"]) {
+      const malformed = spec().replace('model = "example/model-a"', `model = "${model}"`);
+      expect(() => parseExperimentSpec(malformed, { repositoryRoot })).toThrow("requested model");
+    }
+  });
+
   test("requires a fixed multiplicity policy and sufficient bootstrap samples", () => {
     expect(() => parseExperimentSpec(spec().replace("bonferroni", "none"), { repositoryRoot })).toThrow("must equal bonferroni");
     expect(() => parseExperimentSpec(spec().replace("bootstrap_samples = 500", "bootstrap_samples = 100"), { repositoryRoot })).toThrow("at least 500");
@@ -172,6 +241,8 @@ describe("strict experiment specification", () => {
     const expanded = spec()
       .replace('["candidate-a", "candidate-b"]', `[${candidates}]`)
       .replace('["executor-a"]', `[${lanes}]`)
+      .replace('primary_candidate = "candidate-a"', 'primary_candidate = "candidate-0"')
+      .replace('primary_lane = "executor-a"', 'primary_lane = "lane-0"')
       .replace('["item-a", "item-b", "item-c"]', `[${items}]`)
       .replace("repetitions = 3", "repetitions = 4");
     expect(() => parseExperimentSpec(expanded, { repositoryRoot })).toThrow("experiment schedule exceeds");

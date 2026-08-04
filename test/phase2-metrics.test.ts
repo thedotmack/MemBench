@@ -5,7 +5,6 @@ import { join } from "node:path";
 import * as publicApi from "../src";
 import {
   bootstrapPairedItemEffects,
-  compareModelFamily,
   equalItemMean,
   laneId,
   parseExperimentSpec,
@@ -15,8 +14,10 @@ import {
   type ExperimentSpec,
   type ScoredAttempt,
 } from "../src";
+import { compareModelFamilyForTest as compareModelFamily } from "../src/metrics";
 
 const lane = laneId("executor-lane");
+const commitment = `sha256:${"0".repeat(64)}`;
 const corpusDirectory = mkdtempSync(join(tmpdir(), "membench-metrics-corpus."));
 afterAll(() => rmSync(corpusDirectory, { recursive: true, force: true }));
 
@@ -28,6 +29,8 @@ id = "metrics-study"
 repetitions = 3
 candidate_models = ${JSON.stringify(candidateModels)}
 executor_lanes = ["executor-lane"]
+primary_candidate = "${candidateModels[0]}"
+primary_lane = "executor-lane"
 item_ids = ["item-a", "item-b", "item-c"]
 corpus_path = "${corpusDirectory}"
 [routes.observer]
@@ -50,6 +53,13 @@ allow_fallbacks = false
 schedule = "schedule-seed"
 bootstrap = "bootstrap-seed"
 audit = "audit-seed"
+[audit]
+sample_size = 1
+policy = "uniform_without_replacement"
+[observer_sampling]
+temperature = 0.0
+top_p = 1.0
+seed_identity = "observer-seed"
 [executor_sampling]
 temperature = 0.0
 top_p = 1.0
@@ -58,9 +68,21 @@ seed_identity = "executor-seed"
 alpha = 0.05
 minimum_effect = ${minimumEffect}
 maximum_schema_failure_rate = 0.1
+maximum_unknown_outcome_rate = 0.0
 minimum_calibrated_items = 3
+minimum_attribution_rate = 0.5
+minimum_drift_avoidance_rate = 0.5
+minimum_audit_agreement = 0.8
 bootstrap_samples = 500
 multiplicity = "bonferroni"
+[commitments]
+corpus_hash = "${commitment}"
+prompt_hash = "${commitment}"
+harness_hash = "${commitment}"
+judge_hash = "${commitment}"
+observer_event_universe_hash = "${commitment}"
+reference_control_universe_hash = "${commitment}"
+run_hash = "${commitment}"
 [budgets]
 observer_usd = 1.0
 executor_usd = 1.0
@@ -78,7 +100,12 @@ function attempt(
   schemaValid = true,
   candidateId = "model-a",
 ): ScoredAttempt {
-  return { calibration: false, itemId, laneId: lane, candidateId, arm, outcome, repetition, tokensToDone, schemaValid };
+  return {
+    calibration: false, itemId, laneId: lane, candidateId, arm, outcome, repetition, tokensToDone, schemaValid,
+    effectiveProvider: "example-provider",
+    effectiveModel: "example/executor",
+    ...(arm === "candidate" ? { attributionOutcome: "pass" as const, driftAvoidanceOutcome: "pass" as const } : {}),
+  };
 }
 
 const metricItemIds = ["item-a", "item-b", "item-c"] as const;
@@ -109,6 +136,7 @@ function calibrated(itemIds: readonly string[]): CalibrationEvidence[] {
     referenceOutcome: "pass",
     eligible: true,
     reason: "calibrated",
+    reportedCostUsd: null,
   }));
 }
 
@@ -191,6 +219,23 @@ describe("item-level metrics", () => {
     expect(() => summarizeItemArms([valid, { ...valid }])).toThrow("coordinate is duplicated");
     expect(() => summarizeItemArms([{ ...valid, outcome: "maybe" } as unknown as ScoredAttempt])).toThrow("runtime fields");
     expect(() => summarizeItemArms([{ ...valid, schemaValid: 1 } as unknown as ScoredAttempt])).toThrow("runtime fields");
+    expect(() => summarizeItemArms([{
+      ...valid,
+      reportedCosts: {
+        executorUsd: undefined as unknown as null,
+        outcomeJudgeUsd: 0,
+        attributionJudgeUsd: 0,
+        driftJudgeUsd: 0,
+      },
+    }])).toThrow("runtime fields");
+  });
+
+  test("public effective-route telemetry rejects path, markup, delimiter, and bidi labels", () => {
+    const base = attempt("item-a", "candidate", "pass", 0);
+    for (const label of ["path=/etc", "file:/etc", "provider:colon", "C:\\windows", "C:/windows", "provider|cell", "<img>", `model${String.fromCodePoint(0x202e)}name`]) {
+      expect(() => summarizeItemArms([{ ...base, effectiveProvider: label, effectiveModel: "safe-model" }])).toThrow("runtime fields");
+      expect(() => summarizeItemArms([{ ...base, effectiveProvider: "safe-provider", effectiveModel: label }])).toThrow("runtime fields");
+    }
   });
 
   test("non-passing attempts cannot acquire a favorable completion-token value", () => {
@@ -213,6 +258,7 @@ describe("item-level metrics", () => {
       referenceOutcome: "pass",
       eligible: true,
       reason: "calibrated",
+      reportedCostUsd: null,
     };
     expect(() => compareModelFamily(
       completeAttempts(),

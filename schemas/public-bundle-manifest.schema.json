@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://membench.dev/schemas/public-bundle-manifest.schema.json",
+  "title": "MemBench public bundle manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "includeJunit", "files", "contentHash"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "includeJunit": { "type": "boolean" },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report.json", "report.md", "release-provenance.json", "release-attestation.json"],
+      "properties": {
+        "report.json": { "$ref": "#/$defs/file" },
+        "report.md": { "$ref": "#/$defs/file" },
+        "report.junit.xml": { "$ref": "#/$defs/file" },
+        "release-provenance.json": { "$ref": "#/$defs/file" },
+        "release-attestation.json": { "$ref": "#/$defs/file" }
+      }
+    },
+    "contentHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "includeJunit": { "const": true } }, "required": ["includeJunit"] },
+      "then": {
+        "properties": {
+          "files": {
+            "type": "object",
+            "properties": { "report.junit.xml": { "$ref": "#/$defs/file" } },
+            "required": ["report.junit.xml"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "files": {
+            "type": "object",
+            "properties": { "report.junit.xml": false }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

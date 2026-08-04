@@ -1,8 +1,11 @@
 # Scientific core contract
 
 Phase 2 fixes the design before any outcomes are observed. The parsed TOML,
-including all three seeds, budgets, thresholds, and the multiplicity policy,
-is frozen and bound to an experiment identity hash.
+including the primary candidate/lane pair, all three seeds, budgets, floor,
+schema, attribution, drift, and independent-reassessment thresholds, and the
+multiplicity policy, is frozen and bound to a portable configuration identity
+hash. TOML `[commitments]` are expected pre-registration assertions, not trusted
+identity inputs: they are deliberately excluded from that configuration hash.
 
 Executor sampling is also predeclared: temperature, top-p, and a seed identity
 are part of the frozen spec and its identity hash. The executor derives its
@@ -14,20 +17,25 @@ commitment because that SDK request type has no seed field.
 `ExperimentSpec.identityHash` binds the portable run configuration. The
 host-local `corpus_path` is validated but omitted from that portable hash, so
 the same declared experiment has the same identity after relocation. The
-broader `ExperimentIdentity` separately binds the actual corpus content,
-prompts, requested routes, harness, configuration, and judge. That full
-identity is what distinguishes different corpus inputs; the two identities are
-not interchangeable. A parsed spec also carries a process-local issuance
-check. After a process restart, deserialization, or structured clone, callers
-must parse the TOML again rather than trusting an object that merely has the
-same fields and hash.
+artifact issuer separately derives hashes from the exact validated corpus
+items/events, fixed prompt protocols, harness and judge descriptors, routes and
+sampling, reference sources, complete schedule, and actual run manifest. It
+refuses issuance unless each expected TOML commitment equals its independently
+derived value. The broader `ExperimentIdentity` uses those resolved corpus,
+prompt, harness, and judge hashes plus requested routes and configuration. That
+full identity distinguishes different artifact inputs; changing only an
+expected hash label neither changes the configuration identity nor passes
+artifact issuance. A parsed spec and artifact set also carry process-local
+issuance checks. After a process restart, deserialization, or structured clone,
+callers must reparse and rederive from validated source evidence.
 
 The treatment arm is `candidate`. Its controls are `none`, `shuffled`, and
 `reference`. Floor delta is candidate pass rate minus `none` pass rate.
-Reference gap is `reference` pass rate minus candidate pass rate; a positive
-gap is valid and is never clamped. Controls and candidate results are always
-reported as distinct arms. Reference gap and its interval are descriptive;
-they do not participate in the recommendation rule.
+Shuffled delta is candidate pass rate minus `shuffled` pass rate. Reference
+gap is `reference` pass rate minus candidate pass rate; a positive gap is
+valid and is never clamped. Controls and candidate results are always reported
+as distinct arms. Shuffled delta is diagnostic and reference gap is
+descriptive; neither interval participates in the recommendation rule.
 
 The item is the inferential unit. Repetitions estimate variation within an
 item but never give that item extra weight. Intervals resample one paired
@@ -42,10 +50,18 @@ run rather than being overwritten or counted twice.
 Before any model-family decision, every predeclared
 item-by-lane-by-candidate-by-arm cell must contain exactly the configured
 repetitions numbered from zero through `repetitions - 1`. Explicit `unknown`
-rows count as present observations; missing rows make the entire comparison
-family `insufficient_evidence` with an incomplete-matrix reason. Comparison
-output is canonically ordered by candidate and lane, independent of caller
-order.
+rows count as present observations but the declared zero unknown-outcome
+tolerance makes the affected comparison `insufficient_evidence`; only explicit
+`fail` rows increment task failures. Missing rows make the entire comparison
+family insufficient with an incomplete-matrix reason. Public comparison starts
+only from a module-issued execution batch, never caller-supplied attempt or
+calibration arrays. The issuer derives and executes the full schedule, maps the
+exact observer/reference inputs to arms, and commits schedule, manifest, input,
+attempt, calibration, execution-result, and primary-reassessment universes. Comparison
+output is complete over candidate-by-lane pairs and canonically ordered. A
+structured clone, raw-array relabel, reused runner-result object, Spec A→B
+substitution, or deserialized comparison must be recomputed through the bound
+execution path.
 
 Bootstrap inputs are canonically sorted by item identifier before sampling.
 The percentile interval sorts the bootstrap means and uses the zero-based,
@@ -53,15 +69,27 @@ clamped index `floor(probability * sample count)` for each endpoint. The PRNG
 is `membench-mulberry32-sha256-v1`: SHA-256 supplies the initial 32-bit state,
 and bounded integers use uint32 rejection sampling to avoid modulo bias.
 
-Unknown outcomes and missing token or cost measurements remain unknown. They
-are never converted to a pass, a favorable boolean, or zero. An item is
+Unknown outcomes and missing token or cost measurements remain unknown. Any
+candidate outcome, attribution outcome, or drift outcome of `unknown` prevents
+a recommendation under the current policy. They
+are never converted to a pass, a favorable boolean, or zero. Recommendation
+also requires measured attribution and drift-avoidance rates at or above their
+prespecified thresholds; missing evidence is insufficient and a measured
+shortfall is do-not-recommend. An item is
 eligible only when an independent calibration attempt has floor `fail` and
 reference `pass`. Too few calibrated or paired items produces
 `insufficient_evidence` rather than a forced recommendation.
 
 Primary scientific routes require an explicit provider, model, and
 `allow_fallbacks = false`; the effective route remains a separate recorded
-runtime value. Corpus paths must already exist outside the repository after
+runtime value. Every candidate and control execution for a comparison must
+share one effective provider/model pair across all items and repetitions.
+The observer and independent reference calibration must each resolve to their
+exact requested no-fallback provider/model pair before their outputs can be
+used.
+Public effective-route telemetry uses a narrow safe ASCII grammar and rejects
+colon/file forms, local paths, markup, delimiters, controls, format characters,
+and bidi shapes. Corpus paths must already exist outside the repository after
 realpath resolution, including symlink resolution.
 
 Candidate-model values in the experiment are bounded public aliases, not
@@ -79,6 +107,15 @@ bounded from 0.000001 through 0.5, and the minimum decision effect is at least
 0.000001. The parser checks the full four-arm schedule product and the total
 candidate-by-lane bootstrap family before execution. Token counts are safe
 non-negative integers capped at 1,000,000,000, with checked aggregation.
+Per-pair reported attempt-pipeline spend covers all arms and all items,
+including exclusions; family totals add every pair, each independent k=1
+calibration item–lane, observer, and audit once. The report separately compares
+observer spend, executor plus reference-calibration spend, judge plus audit
+spend, and total steps with their declared limits. Any missing executed
+component makes total experimental spend unknown while preserving its component
+breakdown. A missing budget measurement or measured overshoot cannot support a
+recommendation, including when it first appears on the final scheduled call.
+
 Corpus validation preflights document bytes, text bytes, file and event
 counts, starting-tree bytes, structural nodes, and nesting depth before
 recursive parsing or hashing. Selected experiment values are bound by

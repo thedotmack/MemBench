@@ -50,7 +50,8 @@ export interface CalibrationEvidence {
   readonly floorOutcome: Outcome;
   readonly referenceOutcome: Outcome;
   readonly eligible: boolean;
-  readonly reason: "calibrated" | "floor_did_not_fail" | "reference_did_not_pass" | "unknown";
+  readonly reason: "calibrated" | "floor_did_not_fail" | "reference_did_not_pass" | "unknown" | "calibration_instability";
+  readonly reportedCostUsd: number | null;
 }
 
 interface AttemptBase {
@@ -100,11 +101,16 @@ export function assessCalibration(
   laneIdValue: LaneId,
   floorOutcome: Outcome,
   referenceOutcome: Outcome,
+  reportedCostUsd: number | null = null,
 ): CalibrationEvidence {
   if (
     !isSafeIdentifier(itemId) || !isSafeIdentifier(laneIdValue) ||
     !new Set<unknown>(["pass", "fail", "unknown"]).has(floorOutcome) ||
-    !new Set<unknown>(["pass", "fail", "unknown"]).has(referenceOutcome)
+    !new Set<unknown>(["pass", "fail", "unknown"]).has(referenceOutcome) ||
+    (reportedCostUsd !== null && (
+      typeof reportedCostUsd !== "number" || !Number.isFinite(reportedCostUsd) ||
+      reportedCostUsd < 0 || reportedCostUsd > SCIENTIFIC_LIMITS.maximumBudgetUsd
+    ))
   ) throw new TypeError("calibration input is invalid");
   const eligible = floorOutcome === "fail" && referenceOutcome === "pass";
   const reason: CalibrationEvidence["reason"] = eligible
@@ -121,6 +127,7 @@ export function assessCalibration(
     referenceOutcome,
     eligible,
     reason,
+    reportedCostUsd,
   });
 }
 

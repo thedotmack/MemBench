@@ -35,6 +35,8 @@ id = "executor-study"
 repetitions = 3
 candidate_models = ["candidate-a"]
 executor_lanes = ["lane-a"]
+primary_candidate = "candidate-a"
+primary_lane = "lane-a"
 item_ids = ["item-a", "item-b", "item-c"]
 corpus_path = "${corpusPath}"
 [routes.observer]
@@ -57,6 +59,13 @@ allow_fallbacks = false
 schedule = "schedule-seed"
 bootstrap = "bootstrap-seed"
 audit = "audit-seed"
+[audit]
+sample_size = 1
+policy = "uniform_without_replacement"
+[observer_sampling]
+temperature = 0.0
+top_p = 1.0
+seed_identity = "observer-seed"
 [executor_sampling]
 temperature = 0.0
 top_p = 1.0
@@ -65,9 +74,21 @@ seed_identity = "executor-seed"
 alpha = 0.05
 minimum_effect = 0.1
 maximum_schema_failure_rate = 0.05
+maximum_unknown_outcome_rate = 0.0
 minimum_calibrated_items = 3
+minimum_attribution_rate = 0.5
+minimum_drift_avoidance_rate = 0.5
+minimum_audit_agreement = 0.8
 bootstrap_samples = 500
 multiplicity = "bonferroni"
+[commitments]
+corpus_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+prompt_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+harness_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+judge_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+observer_event_universe_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+reference_control_universe_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+run_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 [budgets]
 observer_usd = 1.0
 executor_usd = 1.0
@@ -220,6 +241,35 @@ describe("fixed coding executor", () => {
     expect(sandbox.wasCleaned("attempt-error")).toBe(true);
   });
 
+  test("injected executor results reject invalid costs, durations, tokens, counts, identifiers, and routes", async () => {
+    const malformed: readonly [string, ExecutorTransportResult][] = [
+      ["cost", { ...transportResult, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: -0.01 } }],
+      ["duration", { ...transportResult, durationMs: -1 }],
+      ["input tokens", { ...transportResult, usage: { inputTokens: -1, outputTokens: 1, totalTokens: 0, costUsd: 0 } }],
+      ["step count", { ...transportResult, steps: 0.5 }],
+      ["generation id", { ...transportResult, generationId: "../unsafe" }],
+      ["requested provider", { ...transportResult, route: { requested: { ...route, provider: "/unsafe" }, effective: { provider: null, model: null, routeReported: false } } }],
+      ["executor completion", { ...transportResult, completed: null as unknown as boolean }],
+      ["missing fields", { ...transportResult, modelCalls: undefined as unknown as number }],
+    ];
+    for (let index = 0; index < malformed.length; index += 1) {
+      const [message, injected] = malformed[index] as [string, ExecutorTransportResult];
+      const attemptId = `attempt-boundary-${index}`;
+      const workspace = createAttemptWorkspace({ runRoot: root(), attemptId, startingTree: { "main.txt": "before" }, port: 20_100 + index });
+      const sandbox = createDeterministicTestSandbox(async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false, processTreeCleaned: true }));
+      await expect(executeCodingAttempt({
+        workspace,
+        sandbox,
+        transport: { run: async () => injected },
+        policy: policy(),
+        prompt: "Update",
+        injectedMemory: "",
+        mechanicalCheck: { kind: "command", argv: ["check"], expectedExitCode: 0 },
+      })).rejects.toThrow(message);
+      expect(sandbox.wasCleaned(attemptId)).toBe(true);
+    }
+  });
+
   test("one unclean command makes aggregate cleanup false", async () => {
     const workspace = createAttemptWorkspace({ runRoot: root(), attemptId: "attempt-unclean", startingTree: { "main.txt": "before" }, port: 20_018 });
     const sandbox = createDeterministicTestSandbox(async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false, processTreeCleaned: false }));
@@ -243,6 +293,7 @@ describe("fixed coding executor", () => {
     const adapter = new AgentSdkExecutorTransport(fake);
     const base = { route, prompt: "Synthetic", injectedMemory: "", maximumSteps: 1, maximumCostUsd: 1, sampling, tools: { read: () => "", write: () => {}, list: () => [], search: () => [], command: async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false, processTreeCleaned: true }) } };
     await expect(adapter.run({ ...base, route: { provider: "", model: "model-a", allowFallbacks: false } })).rejects.toThrow();
+    await expect(adapter.run({ ...base, route: { provider: "provider-a", model: "file:/etc", allowFallbacks: false } })).rejects.toThrow("requested model");
     await expect(adapter.run({ ...base, maximumCostUsd: Number.NaN })).rejects.toThrow();
     await expect(adapter.run({ ...base, maximumCostUsd: Number.POSITIVE_INFINITY })).rejects.toThrow();
     await expect(adapter.run({ ...base, maximumCostUsd: 0 })).rejects.toThrow();
@@ -297,5 +348,6 @@ describe("fixed coding executor", () => {
     expect(Object.hasOwn(captured!, "seed")).toBe(false);
     expect(output.completed).toBe(true);
     expect(output.usage.costUsd).toBeNull();
+    expect(output.route.effective).toEqual({ provider: null, model: null, routeReported: false });
   });
 });

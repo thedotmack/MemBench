@@ -15,8 +15,10 @@ import {
   runIndependentAudit,
   sha256,
   validateCorpusItem,
+  type AuditJudgeConfig,
   type CalibrationRunResult,
   type CorpusItem,
+  type IndependentAuditJudgeResult,
   type ModelTransport,
   type ModelTransportRequest,
   type ModelTransportResult,
@@ -28,6 +30,21 @@ const route: RequestedRoute = { provider: "judge-provider", model: "judge-model"
 const auditRoute: RequestedRoute = { provider: "audit-provider", model: "independent-judge", allowFallbacks: false };
 const sampling = { temperature: 0, topP: 1, seed: "judge-seed" } as const;
 const auditConfig = createAuditJudgeConfig({ route: auditRoute, promptHash: sha256("audit-prompt"), schemaHash: sha256("audit-schema"), sampling });
+
+function auditJudgeResult(config: AuditJudgeConfig, outcome: Outcome = "pass", reportedCostUsd = 0): IndependentAuditJudgeResult {
+  return {
+    outcome,
+    route: {
+      requested: config.route,
+      effective: { provider: config.route.provider, model: config.route.model, routeReported: true },
+    },
+    generationId: null,
+    usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: reportedCostUsd },
+    durationMs: 1,
+    protocolHash: config.protocolHash,
+    configHash: config.configHash,
+  };
+}
 
 function calibrationItem(id = "item-a", fact = "Use amber mode"): CorpusItem {
   const base = {
@@ -61,7 +78,7 @@ class QueueTransport implements ModelTransport {
     return {
       text: this.outputs.shift() ?? "",
       generationId: null,
-      route: { requested: request.route, effective: { provider: null, model: null, routeReported: false } },
+      route: { requested: request.route, effective: { provider: request.route.provider, model: request.route.model, routeReported: true } },
       usage: { inputTokens: null, outputTokens: null, totalTokens: null, costUsd: null },
       durationMs: null,
       modelCalls: 1,
@@ -121,6 +138,34 @@ describe("blinded judges", () => {
     expect((await judgeOutcome({ mechanicalPassed: true, isolationPassed: true, task: "Task", blindRubric: "Rubric", diffSummary: "Diff", route, transport: controlled, sampling })).outcome).toBe("unknown");
   });
 
+  test("judge calls fail closed on malformed injected transport telemetry", async () => {
+    const text = JSON.stringify({ outcome: "pass", reason: "Meets rubric" });
+    const base: ModelTransportResult = {
+      text,
+      generationId: "generation-safe",
+      route: { requested: route, effective: { provider: route.provider, model: route.model, routeReported: true } },
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.01 },
+      durationMs: 1,
+      modelCalls: 1,
+      steps: 1,
+    };
+    const malformed: readonly ModelTransportResult[] = [
+      { ...base, usage: { ...base.usage, costUsd: -0.01 } },
+      { ...base, durationMs: -1 },
+      { ...base, usage: { ...base.usage, inputTokens: -1 } },
+      { ...base, generationId: "../../unsafe" },
+      { ...base, route: { requested: { ...route, model: "/unsafe" }, effective: { provider: route.provider, model: route.model, routeReported: true } } },
+      { ...base, modelCalls: -1 },
+      { ...base, steps: undefined as unknown as number },
+    ];
+    for (const result of malformed) {
+      const transport: ModelTransport = { call: async () => result };
+      const judgment = await judgeOutcome({ mechanicalPassed: true, isolationPassed: true, task: "Task", blindRubric: "Rubric", diffSummary: "Diff", route, transport, sampling });
+      expect(judgment.outcome).toBe("unknown");
+      expect(judgment.telemetry).toBeNull();
+    }
+  });
+
   test("attribution requires exact fact and exact downstream consequence", async () => {
     const good = new QueueTransport([JSON.stringify({ attribution: "supported", injectedFact: "Use amber mode", downstreamConsequence: "The file selects amber", reason: "The edit follows the fact" })]);
     const supported = await judgeAttribution({ injectedFacts: ["Use amber mode"], downstreamEvidence: ["The file selects amber"], route, transport: good, sampling });
@@ -139,12 +184,16 @@ describe("calibration and independent audit", () => {
     const result = await calibrateIndependentK1({
       reference: bound,
       scoredRows: [{ attemptId: "attempt-scored", outcome: "pass" }],
-      executor: { run: async (input): Promise<CalibrationRunResult> => { seen.push(input); return { attemptId: input.attemptId, outcome: input.injectionText === "" ? "fail" : "pass" }; } },
+      executor: { run: async (input): Promise<CalibrationRunResult> => {
+        seen.push(input);
+        return { attemptId: input.attemptId, outcome: input.injectionText === "" ? "fail" : "pass", reportedCostUsd: 0.01 };
+      } },
     });
     expect(result.status).toBe("calibrated");
     expect(seen).toHaveLength(2);
     expect(seen[0]?.attemptId).not.toBe(seen[1]?.attemptId);
     expect(seen.every((row) => row.attemptId !== "attempt-scored")).toBe(true);
+    expect(result.evidence?.reportedCostUsd).toBeCloseTo(0.02);
     const excluded = await calibrateIndependentK1({ reference: bound, scoredRows: [], exclusions: ["reference evidence excluded"], executor: { run: async () => { throw new Error("must not run"); } } });
     expect(excluded.exclusions).toEqual(["reference evidence excluded"]);
   });
@@ -175,7 +224,7 @@ describe("calibration and independent audit", () => {
   });
 
   test("seeded audit is predeclared, deterministic, and reports agreement", () => {
-    const candidates = ["row-a", "row-b", "row-c", "row-d"].map((rowId, index) => ({ rowId, evidence: { value: rowId }, primaryOutcome: (index % 2 === 0 ? "pass" : "fail") as Outcome }));
+    const candidates = ["row-a", "row-b", "row-c", "row-d"].map((rowId, index) => ({ rowId, reassessmentEvidence: { value: rowId }, primaryOutcome: (index % 2 === 0 ? "pass" : "fail") as Outcome }));
     const first = predeclareAuditSample(candidates, 3, "audit-seed", auditConfig);
     expect(predeclareAuditSample([...candidates].reverse(), 3, "audit-seed", auditConfig)).toEqual(first);
     const outcomes = Object.fromEntries(first.selectedRowIds.map((id) => [id, candidates.find((row) => row.rowId === id)?.primaryOutcome ?? "unknown"])) as Record<string, Outcome>;
@@ -185,10 +234,10 @@ describe("calibration and independent audit", () => {
   });
 
   test("independent audit judges only the predeclared sample and settles unavailable rows", async () => {
-    const candidates = ["row-a", "row-b", "row-c"].map((rowId) => ({ rowId, evidence: { value: rowId }, primaryOutcome: "pass" as const }));
+    const candidates = ["row-a", "row-b", "row-c"].map((rowId) => ({ rowId, reassessmentEvidence: { value: rowId }, primaryOutcome: "pass" as const }));
     const manifest = predeclareAuditSample(candidates, 2, "audit-run-seed", auditConfig);
     const seen: string[] = [];
-    const result = await runIndependentAudit(manifest, candidates, auditConfig, { judge: async (row) => { seen.push(row.rowId); if (seen.length === 1) throw new Error("synthetic unavailable"); return "pass"; } });
+    const result = await runIndependentAudit(manifest, candidates, auditConfig, { judge: async (row) => { seen.push(row.rowId); if (seen.length === 1) throw new Error("synthetic unavailable"); return auditJudgeResult(row.config); } });
     expect(seen.sort()).toEqual([...manifest.selectedRowIds].sort());
     expect(result.agreement.selected).toBe(2);
     expect(result.agreement.judged).toBe(1);
@@ -196,12 +245,12 @@ describe("calibration and independent audit", () => {
 
   test("audit binds the eligible evidence universe and judge identity", async () => {
     const candidates = [
-      { rowId: "row-a", evidence: { value: "alpha" }, primaryOutcome: "pass" as const },
-      { rowId: "row-b", evidence: { value: "beta" }, primaryOutcome: "fail" as const },
+      { rowId: "row-a", reassessmentEvidence: { value: "alpha" }, primaryOutcome: "pass" as const },
+      { rowId: "row-b", reassessmentEvidence: { value: "beta" }, primaryOutcome: "fail" as const },
     ];
     const manifest = predeclareAuditSample(candidates, 2, "bound-seed", auditConfig);
-    await expect(runIndependentAudit(manifest, [{ ...candidates[0]!, evidence: { value: "substituted" } }, candidates[1]!], auditConfig, { judge: async () => "pass" })).rejects.toThrow("manifest");
-    await expect(runIndependentAudit(manifest, [{ ...candidates[0]!, primaryOutcome: "fail" }, candidates[1]!], auditConfig, { judge: async () => "pass" })).rejects.toThrow("manifest");
+    await expect(runIndependentAudit(manifest, [{ ...candidates[0]!, reassessmentEvidence: { value: "substituted" } }, candidates[1]!], auditConfig, { judge: async (input) => auditJudgeResult(input.config) })).rejects.toThrow("manifest");
+    await expect(runIndependentAudit(manifest, [{ ...candidates[0]!, primaryOutcome: "fail" }, candidates[1]!], auditConfig, { judge: async (input) => auditJudgeResult(input.config) })).rejects.toThrow("manifest");
     expect(() => predeclareAuditSample([candidates[0]!, { ...candidates[1]!, rowId: "row-a" }], 1, "seed", auditConfig)).toThrow("unique");
     const changedConfig = createAuditJudgeConfig({ route: { ...auditRoute, provider: "different-provider" }, promptHash: auditConfig.promptHash, schemaHash: auditConfig.schemaHash, sampling });
     expect(() => calculateAuditAgreement(manifest, candidates, { "row-a": "pass" }, changedConfig)).toThrow("manifest");
@@ -210,10 +259,10 @@ describe("calibration and independent audit", () => {
   });
 
   test("independent audit never exposes primary outcomes to its judge", async () => {
-    const candidates = [{ rowId: "row-a", evidence: { value: "alpha" }, primaryOutcome: "pass" as const }];
+    const candidates = [{ rowId: "row-a", reassessmentEvidence: { value: "alpha" }, primaryOutcome: "pass" as const }];
     const manifest = predeclareAuditSample(candidates, 1, "blind-seed", auditConfig);
     let keys: string[] = [];
-    await runIndependentAudit(manifest, candidates, auditConfig, { judge: async (value) => { keys = Object.keys(value).sort(); expect(value.blindedEvidence).toEqual({ value: "alpha" }); return "pass"; } });
-    expect(keys).toEqual(["blindedEvidence", "config", "rowId"]);
+    await runIndependentAudit(manifest, candidates, auditConfig, { judge: async (value) => { keys = Object.keys(value).sort(); expect(value.reassessmentEvidence).toEqual({ value: "alpha" }); return auditJudgeResult(value.config); } });
+    expect(keys).toEqual(["candidateId", "config", "laneId", "reassessmentEvidence", "rowId"]);
   });
 });
