@@ -1,0 +1,4 @@
+# Reproducibility flags are supplied explicitly by project commands and CI.
+
+[test]
+timeout = 30000

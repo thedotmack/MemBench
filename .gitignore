@@ -1,0 +1,14 @@
+node_modules/
+coverage/
+dist/
+build/
+.cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+.ori/
+artifacts/
+runs/
+private/
+tmp/

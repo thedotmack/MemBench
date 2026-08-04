@@ -1,0 +1,8 @@
+MemBench
+
+This clean-room repository contains newly authored source code and synthetic
+test material. It does not include historical repositories, private corpora,
+model transcripts, run artifacts, or vendored memory-backend implementations.
+
+Third-party packages remain subject to their own licenses.
+

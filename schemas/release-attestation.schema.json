@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://membench.dev/schemas/release-attestation.schema.json",
+  "title": "MemBench corpus release attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "corpusId",
+    "corpusVersion",
+    "reviewedAt",
+    "reviewerRole",
+    "reviewRecordReference",
+    "decision",
+    "checks",
+    "contentHash"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "corpusId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "maxLength": 80
+    },
+    "corpusVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "reviewedAt": { "type": "string", "format": "date-time" },
+    "reviewerRole": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "[\\p{L}\\p{N}]"
+    },
+    "reviewRecordReference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "pattern": "[\\p{L}\\p{N}]"
+    },
+    "decision": { "type": "string", "enum": ["approved", "rejected"] },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorityVerified",
+        "consentVerified",
+        "licenseVerified",
+        "independentReviewComplete",
+        "sensitiveDataReviewComplete",
+        "secretScanComplete"
+      ],
+      "properties": {
+        "authorityVerified": { "type": "boolean" },
+        "consentVerified": { "type": "boolean" },
+        "licenseVerified": { "type": "boolean" },
+        "independentReviewComplete": { "type": "boolean" },
+        "sensitiveDataReviewComplete": { "type": "boolean" },
+        "secretScanComplete": { "type": "boolean" }
+      }
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": { "decision": { "const": "approved" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "checks": {
+            "type": "object",
+            "properties": {
+              "authorityVerified": { "const": true },
+              "consentVerified": { "const": true },
+              "licenseVerified": { "const": true },
+              "independentReviewComplete": { "const": true },
+              "sensitiveDataReviewComplete": { "const": true },
+              "secretScanComplete": { "const": true }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
