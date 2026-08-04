@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://membench.invalid/schemas/observation.schema.json",
+  "title": "MemBench background observation",
+  "$comment": "This artifact validates structure. Cross-record id uniqueness and I-JSON Unicode scalar validity are enforced by the documented semantic layer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "memories"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "memories": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "metadata"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "maxLength": 80
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 250000,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*[\\p{L}\\p{N}][^\\u0000-\\u001F\\u007F-\\u009F]*$"
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 64,
+            "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$" },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*[\\p{L}\\p{N}][^\\u0000-\\u001F\\u007F-\\u009F]*$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

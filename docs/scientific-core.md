@@ -4,6 +4,13 @@ Phase 2 fixes the design before any outcomes are observed. The parsed TOML,
 including all three seeds, budgets, thresholds, and the multiplicity policy,
 is frozen and bound to an experiment identity hash.
 
+Executor sampling is also predeclared: temperature, top-p, and a seed identity
+are part of the frozen spec and its identity hash. The executor derives its
+route, limits, and sampling policy only from that parser-issued spec. With the
+pinned Agent SDK 0.8.0 adapter, temperature and top-p are transmitted using
+the exact supported request fields; the seed identity remains an identity
+commitment because that SDK request type has no seed field.
+
 `ExperimentSpec.identityHash` binds the portable run configuration. The
 host-local `corpus_path` is validated but omitted from that portable hash, so
 the same declared experiment has the same identity after relocation. The

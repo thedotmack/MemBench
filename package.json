@@ -12,7 +12,8 @@
     "release:gate": "bash scripts/release-gate.sh"
   },
   "dependencies": {
-    "@openrouter/agent": "0.8.0"
+    "@openrouter/agent": "0.8.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",

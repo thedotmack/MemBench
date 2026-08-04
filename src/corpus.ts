@@ -81,6 +81,8 @@ export interface CorpusItem {
   readonly contentHash: Sha256;
 }
 
+const issuedCorpusItems = new WeakSet<object>();
+
 const hashShape = /^sha256:[a-f0-9]{64}$/u;
 const blockedKeyNames = new Set([
   "sessionid",
@@ -579,7 +581,16 @@ export function validateCorpusItem(value: unknown): CorpusItem {
   if (Date.parse(releaseAttestation.reviewedAt) < Date.parse(provenance.createdAt)) {
     throw new TypeError("release review cannot predate corpus creation");
   }
-  return deepFreeze({ ...base, provenance, releaseAttestation, contentHash });
+  const item = deepFreeze({ ...base, provenance, releaseAttestation, contentHash });
+  issuedCorpusItems.add(item);
+  return item;
+}
+
+export function assertCorpusItemIdentity(item: CorpusItem): void {
+  if (!issuedCorpusItems.has(item) || !Object.isFrozen(item)) throw new TypeError("corpus item must be validated in this process");
+  if (corpusContentHash(item) !== item.contentHash || item.provenance.contentHash !== item.contentHash || item.releaseAttestation.contentHash !== item.contentHash) {
+    throw new TypeError("corpus item identity changed after validation");
+  }
 }
 
 export function corpusEventEvidence(event: CorpusEvent): string {

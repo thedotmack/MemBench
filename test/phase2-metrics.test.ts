@@ -50,6 +50,10 @@ allow_fallbacks = false
 schedule = "schedule-seed"
 bootstrap = "bootstrap-seed"
 audit = "audit-seed"
+[executor_sampling]
+temperature = 0.0
+top_p = 1.0
+seed_identity = "executor-seed"
 [decision]
 alpha = 0.05
 minimum_effect = ${minimumEffect}

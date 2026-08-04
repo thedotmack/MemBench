@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import Ajv2020 from "ajv/dist/2020";
 import addFormats from "ajv-formats";
+import { OBSERVATION_JSON_SCHEMA, validateMemoryRecord, validateMemoryRecordSchema } from "../src";
 
 const schemaRoot = join(import.meta.dir, "..", "schemas");
 
@@ -62,9 +63,41 @@ function approvedAttestation() {
   };
 }
 
-test("both schemas compile in strict Draft 2020 mode with formats", async () => {
+test("all public schemas compile in strict Draft 2020 mode with formats", async () => {
   expect(await strictValidator("corpus-provenance.schema.json")).toBeFunction();
   expect(await strictValidator("release-attestation.schema.json")).toBeFunction();
+  expect(await strictValidator("observation.schema.json")).toBeFunction();
+});
+
+test("observation schema is closed and bounds public memory records", async () => {
+  const validate = await strictValidator("observation.schema.json");
+  const valid = { schemaVersion: 1, memories: [{ id: "synthetic-fact", text: "Use amber mode", metadata: { source: "synthetic" } }] };
+  expect(validate(valid)).toBe(true);
+  expect(validate({ ...valid, extra: true })).toBe(false);
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], extra: true }] })).toBe(false);
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], id: "../escape" }] })).toBe(false);
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], id: "synthetic.fact" }] })).toBe(false);
+  expect(() => validateMemoryRecordSchema({ ...valid.memories[0], id: "synthetic.fact" })).toThrow();
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], text: "   " }] })).toBe(false);
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], text: "word\nnext" }] })).toBe(false);
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], text: "mode-😀" }] })).toBe(true);
+  expect(() => validateMemoryRecord({ ...valid.memories[0], text: "   " })).toThrow();
+  expect(() => validateMemoryRecord({ ...valid.memories[0], text: "word\nnext" })).toThrow();
+  expect(validateMemoryRecord({ ...valid.memories[0], text: "mode-😀" }).text).toBe("mode-😀");
+  const multibyteWithinCodePointLimit = `${"😀".repeat(70_000)}a`;
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], text: multibyteWithinCodePointLimit }] })).toBe(true);
+  expect(validateMemoryRecord({ ...valid.memories[0], text: multibyteWithinCodePointLimit }).text).toBe(multibyteWithinCodePointLimit);
+  const beyondCodePointLimit = `${"😀".repeat(250_000)}a`;
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], text: beyondCodePointLimit }] })).toBe(false);
+  expect(() => validateMemoryRecordSchema({ ...valid.memories[0], text: beyondCodePointLimit })).toThrow();
+  const loneSurrogate = `valid${String.fromCharCode(0xd800)}`;
+  expect(validate({ ...valid, memories: [{ ...valid.memories[0], text: loneSurrogate }] })).toBe(true);
+  expect(validateMemoryRecordSchema({ ...valid.memories[0], text: loneSurrogate }).text).toBe(loneSurrogate);
+  expect(() => validateMemoryRecord({ ...valid.memories[0], text: loneSurrogate })).toThrow("I-JSON");
+});
+
+test("runtime observation schema exactly matches the public artifact", async () => {
+  expect(await loadSchema("observation.schema.json")).toEqual(OBSERVATION_JSON_SCHEMA);
 });
 
 test("synthetic provenance binds origin and authority", async () => {

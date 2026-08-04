@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, parse as parsePath } from "node:path";
 
-import { assertExperimentSpecIdentity, parseExperimentSpec, type ExperimentSpec } from "../src";
+import { assertExperimentSpecIdentity, executorAttemptPolicyFromSpec, parseExperimentSpec, type ExperimentSpec } from "../src";
 
 const repositoryRoot = process.cwd();
 const externalCorpusDirectory = mkdtempSync(join(tmpdir(), "membench-spec-corpus."));
@@ -50,6 +50,11 @@ schedule = "schedule-seed"
 bootstrap = "bootstrap-seed"
 audit = "audit-seed"
 
+[executor_sampling]
+temperature = 0.0
+top_p = 1.0
+seed_identity = "executor-seed"
+
 [decision]
 alpha = 0.05
 minimum_effect = 0.1
@@ -72,6 +77,7 @@ describe("strict experiment specification", () => {
     expect(parsed.experiment.repetitions).toBe(3);
     expect(parsed.routes.observer.allowFallbacks).toBeFalse();
     expect(parsed.decision.multiplicity).toBe("bonferroni");
+    expect(parsed.executorSampling).toEqual({ temperature: 0, topP: 1, seedIdentity: "executor-seed" });
     expect(parsed.identityHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(Object.isFrozen(parsed)).toBeTrue();
     expect(Object.isFrozen(parsed.decision)).toBeTrue();
@@ -81,6 +87,19 @@ describe("strict experiment specification", () => {
     const first = parseExperimentSpec(spec(), { repositoryRoot });
     const second = parseExperimentSpec(spec().replace("minimum_effect = 0.1", "minimum_effect = 0.2"), { repositoryRoot });
     expect(first.identityHash).not.toBe(second.identityHash);
+  });
+
+  test("executor sampling is strict, frozen, and bound to experiment identity", () => {
+    const first = parseExperimentSpec(spec(), { repositoryRoot });
+    const second = parseExperimentSpec(spec().replace("seed_identity = \"executor-seed\"", "seed_identity = \"other-seed\""), { repositoryRoot });
+    expect(first.identityHash).not.toBe(second.identityHash);
+    expect(Object.isFrozen(first.executorSampling)).toBeTrue();
+    const firstPolicy = executorAttemptPolicyFromSpec(first);
+    const secondPolicy = executorAttemptPolicyFromSpec(second);
+    expect(firstPolicy.policyHash).not.toBe(secondPolicy.policyHash);
+    expect(firstPolicy.sampling).toEqual({ temperature: 0, topP: 1, seed: "executor-seed" });
+    expect(() => parseExperimentSpec(spec().replace("seed_identity = \"executor-seed\"", "seed_identity = \"\""), { repositoryRoot })).toThrow();
+    expect(() => parseExperimentSpec(spec().replace("top_p = 1.0", "top_p = 2.0"), { repositoryRoot })).toThrow();
   });
 
   test("portable identity excludes the host-local corpus directory", () => {
@@ -129,6 +148,7 @@ describe("strict experiment specification", () => {
     expect(() => parseExperimentSpec(spec().replace("allow_fallbacks = false\n\n[routes.executor]", "\n[routes.executor]"), { repositoryRoot })).toThrow("missing key: allow_fallbacks");
     expect(() => parseExperimentSpec(spec().replace("allow_fallbacks = false", "allow_fallbacks = true"), { repositoryRoot })).toThrow("must be false");
     expect(() => parseExperimentSpec(spec().replace("audit = \"audit-seed\"", ""), { repositoryRoot })).toThrow("missing key: audit");
+    expect(() => parseExperimentSpec(spec().replace("seed_identity = \"executor-seed\"", ""), { repositoryRoot })).toThrow("missing key: seed_identity");
     expect(() => parseExperimentSpec(spec().replace("minimum_calibrated_items = 3", "minimum_calibrated_items = 2"), { repositoryRoot })).toThrow("at least 3");
     expect(() => parseExperimentSpec(spec().replace("judge_usd = 1.0", ""), { repositoryRoot })).toThrow("missing key: judge_usd");
   });

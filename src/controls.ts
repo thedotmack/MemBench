@@ -1,5 +1,5 @@
 import { compareText, deepFreeze, hashJson } from "./canonical";
-import { corpusEventEvidenceLeaves, type CorpusItem } from "./corpus";
+import { assertCorpusItemIdentity, corpusEventEvidenceLeaves, type CorpusItem } from "./corpus";
 import { isSafeIdentifier } from "./identifiers";
 import { SeededRandom } from "./prng";
 import { SCIENTIFIC_LIMITS } from "./limits";
@@ -41,6 +41,20 @@ export interface ReferenceControl {
 export interface ReferenceCompilation {
   readonly control: ReferenceControl;
   readonly auditEvidence: readonly AuditedAtomicFact[];
+}
+
+const issuedReferenceControls = new WeakMap<object, `sha256:${string}`>();
+
+export function snapshotIssuedReferenceControl(control: ReferenceControl): ReferenceControl {
+  const source = control as unknown as Record<string, unknown>;
+  if (control === null || typeof control !== "object" || Object.keys(source).length !== 4 ||
+    source.kind !== "reference" || !/^sha256:[a-f0-9]{64}$/u.test(String(source.sourceHash)) ||
+    typeof source.injectionText !== "string" || !Array.isArray(source.factTexts) ||
+    source.factTexts.some((fact) => typeof fact !== "string") || source.injectionText !== source.factTexts.join("\n") ||
+    !Object.isFrozen(control) || issuedReferenceControls.get(control) !== hashJson(control)) {
+    throw new TypeError("reference control must be compiled and unchanged in this process");
+  }
+  return deepFreeze({ kind: "reference", sourceHash: control.sourceHash, injectionText: control.injectionText, factTexts: [...control.factTexts] });
 }
 
 export function createShuffledDonorMap(
@@ -89,9 +103,10 @@ function meaningfulEvidence(value: string): boolean {
 }
 
 export function compileReferenceControl(
-  item: Pick<CorpusItem, "task" | "events">,
+  item: CorpusItem,
   proposedFacts: readonly ProposedAtomicFact[],
 ): ReferenceCompilation {
+  assertCorpusItemIdentity(item);
   if (proposedFacts.length > SCIENTIFIC_LIMITS.maximumItems) {
     throw new RangeError("proposed reference facts exceed the bounded allocation");
   }
@@ -130,11 +145,12 @@ export function compileReferenceControl(
     return { ...fact, admitted: exclusionReason === null, exclusionReason };
   });
   const factTexts = auditEvidence.filter((fact) => fact.admitted).map((fact) => fact.text);
-  const control: ReferenceControl = {
+  const control = deepFreeze({
     kind: "reference",
-    sourceHash: hashJson({ task: item.task, events: item.events }),
+    sourceHash: item.contentHash,
     injectionText: factTexts.join("\n"),
     factTexts,
-  };
+  } satisfies ReferenceControl);
+  issuedReferenceControls.set(control, hashJson(control));
   return deepFreeze({ control, auditEvidence });
 }

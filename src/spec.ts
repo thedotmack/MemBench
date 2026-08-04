@@ -31,6 +31,11 @@ export interface ExperimentSpec {
     readonly bootstrap: string;
     readonly audit: string;
   };
+  readonly executorSampling: {
+    readonly temperature: number;
+    readonly topP: number;
+    readonly seedIdentity: string;
+  };
   readonly decision: {
     readonly alpha: number;
     readonly minimumEffect: number;
@@ -157,6 +162,7 @@ function identityPayload(spec: Omit<ExperimentSpec, "identityHash">): object {
     experiment: portableExperiment,
     routes: spec.routes,
     seeds: spec.seeds,
+    executorSampling: spec.executorSampling,
     decision: spec.decision,
     budgets: spec.budgets,
   };
@@ -180,7 +186,7 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
     throw new TypeError(`invalid TOML: ${error instanceof Error ? error.message : "parse failure"}`);
   }
   const root = table(parsed, "spec");
-  exactKeys(root, ["version", "experiment", "routes", "seeds", "decision", "budgets"], "spec");
+  exactKeys(root, ["version", "experiment", "routes", "seeds", "executor_sampling", "decision", "budgets"], "spec");
   if (root.version !== 1) throw new TypeError("spec.version must equal 1");
 
   const experiment = table(root.experiment, "experiment");
@@ -198,6 +204,13 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
 
   const seeds = table(root.seeds, "seeds");
   exactKeys(seeds, ["schedule", "bootstrap", "audit"], "seeds");
+
+  const executorSampling = table(root.executor_sampling, "executor_sampling");
+  exactKeys(executorSampling, ["temperature", "top_p", "seed_identity"], "executor_sampling");
+  const executorTemperature = numberValue(executorSampling.temperature, "executor_sampling.temperature");
+  if (executorTemperature > 2) throw new TypeError("executor sampling temperature exceeds two");
+  const executorTopP = numberValue(executorSampling.top_p, "executor_sampling.top_p");
+  if (executorTopP > 1) throw new TypeError("executor sampling top_p exceeds one");
 
   const decision = table(root.decision, "decision");
   exactKeys(
@@ -254,6 +267,11 @@ export function parseExperimentSpec(source: string, options: ParseSpecOptions): 
       schedule: stringValue(seeds.schedule, "seeds.schedule"),
       bootstrap: stringValue(seeds.bootstrap, "seeds.bootstrap"),
       audit: stringValue(seeds.audit, "seeds.audit"),
+    },
+    executorSampling: {
+      temperature: executorTemperature,
+      topP: executorTopP,
+      seedIdentity: stringValue(executorSampling.seed_identity, "executor_sampling.seed_identity", SCIENTIFIC_LIMITS.maximumSeedLength),
     },
     decision: {
       alpha,
