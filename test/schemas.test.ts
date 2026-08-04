@@ -107,13 +107,25 @@ test("authorized public provenance requires matching origin, authority, and sour
 
 test("provenance date-time format is enforced", async () => {
   const validate = await strictValidator("corpus-provenance.schema.json");
+  for (const createdAt of [
+    "2026-01-15T12:30:00Z",
+    "2026-01-15T12:30:00.1Z",
+    "2026-01-15T12:30:00.123Z",
+  ]) expect(validate({ ...syntheticProvenance(), createdAt })).toBe(true);
   expect(validate({ ...syntheticProvenance(), createdAt: "not-a-date" })).toBe(false);
+  expect(validate({ ...syntheticProvenance(), createdAt: "2026-01-15T12:30:00.0001Z" })).toBe(false);
+  expect(validate({ ...syntheticProvenance(), createdAt: "2026-01-15T12:30:00+00:00" })).toBe(false);
 });
 
 test("approved attestations require boolean true checks and valid date-time", async () => {
   const validate = await strictValidator("release-attestation.schema.json");
   const valid = approvedAttestation();
   expect(validate(valid)).toBe(true);
+  for (const reviewedAt of [
+    "2026-01-16T09:45:00Z",
+    "2026-01-16T09:45:00.1Z",
+    "2026-01-16T09:45:00.123Z",
+  ]) expect(validate({ ...valid, reviewedAt })).toBe(true);
   expect(
     validate({
       ...valid,
@@ -127,6 +139,8 @@ test("approved attestations require boolean true checks and valid date-time", as
     }),
   ).toBe(false);
   expect(validate({ ...valid, reviewedAt: "not-a-date" })).toBe(false);
+  expect(validate({ ...valid, reviewedAt: "2026-01-16T09:45:00.0001Z" })).toBe(false);
+  expect(validate({ ...valid, reviewedAt: "2026-01-16T09:45:00+00:00" })).toBe(false);
 });
 
 test("mandatory provenance evidence rejects whitespace-only strings", async () => {

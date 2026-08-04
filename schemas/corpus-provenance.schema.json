@@ -30,7 +30,11 @@
       "type": "string",
       "enum": ["synthetic", "authorized_public"]
     },
-    "createdAt": { "type": "string", "format": "date-time" },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?Z$"
+    },
     "origin": {
       "type": "object",
       "additionalProperties": false,
@@ -48,6 +52,7 @@
         },
         "sourceReferences": {
           "type": "array",
+          "maxItems": 1000,
           "items": {
             "type": "string",
             "minLength": 1,
