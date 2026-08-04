@@ -171,10 +171,11 @@ const attempts = await mapLimit(schedule, 4, async ({ item, itemIndex, arm, repe
   return { itemId: item.id, arm, repetition, response: result.text, success: successful(result.text, item), provider: result.provider, usage: result.usage, generationId: result.generationId };
 });
 
+type ArmRate = { successes: number; attempts: number; rate: number };
 const armRates = Object.fromEntries(arms.map((arm) => {
   const rows = attempts.filter((row) => row.arm === arm);
   return [arm, { successes: rows.filter((row) => row.success).length, attempts: rows.length, rate: mean(rows.map((row) => Number(row.success))) }];
-}));
+})) as Record<(typeof arms)[number], ArmRate>;
 const itemRates = new Map(items.flatMap((item) => arms.map((arm) => {
   const rows = attempts.filter((row) => row.itemId === item.id && row.arm === arm);
   return [`${item.id}:${arm}`, mean(rows.map((row) => Number(row.success)))] as const;

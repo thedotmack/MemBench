@@ -623,7 +623,7 @@ describe("derived scientific report", () => {
       spec,
       artifacts,
       eventBatches: eventBatchesFor(spec.experiment.itemIds),
-      transport: { call: async (request) => {
+      transport: { call: async (request: Parameters<ModelTransport["call"]>[0]) => {
         dispatched.push(request.sampling);
         return {
           text: JSON.stringify({ schemaVersion: 1, memories: [] }), generationId: null,
